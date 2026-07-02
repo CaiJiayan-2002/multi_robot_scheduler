@@ -1,0 +1,76 @@
+{
+  "scenario": "1A1B",
+  "makespan": 60000,
+  "path_length": {
+    "total": 3863,
+    "by_robot": {
+      "A_1": 2535,
+      "B_1": 1328
+    },
+    "by_type": {
+      "A": 2535,
+      "B": 1328
+    }
+  },
+  "wait_times": {
+    "total_precedence": 2,
+    "total_conflict": 56939,
+    "total_idle": 58098,
+    "total": 114950,
+    "by_robot": {
+      "A_1": {
+        "precedence": 0,
+        "conflict": 56914,
+        "idle": 0,
+        "total": 56825
+      },
+      "B_1": {
+        "precedence": 2,
+        "conflict": 25,
+        "idle": 58098,
+        "total": 58125
+      }
+    }
+  },
+  "collisions_violations": {
+    "collisions": 9,
+    "constraint_violations": 0,
+    "precedence_violations": 0
+  },
+  "utilization": {
+    "A_1": {
+      "service_utilization_pct": 0.89,
+      "movement_utilization_pct": 4.4,
+      "wait_ratio_pct": 94.71
+    },
+    "B_1": {
+      "service_utilization_pct": 0.8,
+      "movement_utilization_pct": 2.33,
+      "wait_ratio_pct": 96.88
+    }
+  },
+  "load_balance": {
+    "cv_a": 0.0,
+    "cv_b": 0.0,
+    "gap_a": 0.0,
+    "gap_b": 0.0
+  },
+  "timing": {
+    "map_preprocess": 0.066,
+    "solver": 0.0001,
+    "simulation": 233.5774,
+    "total_wall": 233.6436
+  },
+  "planning_quality": {
+    "replans": 56939,
+    "solver_status": "feasible",
+    "fallback_used": true
+  },
+  "machine_completion": {
+    "PENDING_DISASSEMBLY": 0,
+    "PENDING_INSPECTION": 0,
+    "PENDING_INSTALLATION": 7,
+    "COMPLETED": 41,
+    "total": 48
+  }
+}

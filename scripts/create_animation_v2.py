@@ -34,6 +34,16 @@ for rid, pts in trajectories.items():
         time_index[int(p["t"])][rid] = (int(p["x"]), int(p["y"]))
 
 all_t = sorted(time_index.keys())
+
+# Forward-fill robot positions to cover gaps during work time
+# (safety net in case trajectory data still has gaps after plots.py fix)
+for rid in trajectories:
+    last_pos = None
+    for t in range(min(all_t), max(all_t) + 1):
+        if t in time_index and rid in time_index[t]:
+            last_pos = time_index[t][rid]
+        elif last_pos is not None:
+            time_index[t][rid] = last_pos
 display_t = [t for t in all_t if t >= 1]
 
 # ===== Build machine state timeline from event_log =====
@@ -80,15 +90,28 @@ for t in sorted(work_times.keys()):
         else:
             current_work[rid] = (t, info["machine"])
 
-# ===== Sampling: 2fps =====
-step = max(1, len(display_t) // 600)  # ~300 frames for 150s at 2fps
-if step > 1:
-    step = max(1, len(display_t) // 300)  # cap at ~300 frames
+# ===== Sampling: show every step for smooth 1-cell-per-frame motion =====
+# step=1 ensures robots move exactly 1 cell per frame (no teleporting)
+step = 1
 sampled_t = [display_t[i] for i in range(0, len(display_t), step)]
+
+# Insert keyframes at state change moments (redundant with step=1 but safe)
+state_change_times = sorted(machine_states.keys())
+keyframe_t = [t for t in state_change_times if t >= 1]
+all_frames = sorted(set(sampled_t + keyframe_t))
+deduped = []
+for t in all_frames:
+    if not deduped or t - deduped[-1] >= 1:
+        deduped.append(t)
+sampled_t = deduped
 n_frames = len(sampled_t)
 
-print(f"Animation: {n_frames} frames, {n_frames/2:.0f}s @ 2fps")
-print(f"t=[{sampled_t[0]}..{sampled_t[-1]}], step={step}")
+# Use higher fps so the full step-by-step animation stays under ~4 min
+fps = max(15, min(30, n_frames // 180))  # target ~3 min at minimum 15fps
+fps = min(fps, 20)  # cap at 20fps to keep file size reasonable
+
+print(f"Animation: {n_frames} frames, {n_frames/fps:.0f}s @ {fps}fps (step={step})")
+print(f"t=[{sampled_t[0]}..{sampled_t[-1]}], keyframes={len(keyframe_t)}")
 
 # ===== Figure =====
 fig, ax = plt.subplots(figsize=(18, 14))
@@ -227,17 +250,18 @@ def update(i):
     return []
 
 # ===== Render =====
-anim = FuncAnimation(fig, update, frames=n_frames, interval=500, blit=False)  # 500ms = 2fps
+interval_ms = int(1000 / fps)
+anim = FuncAnimation(fig, update, frames=n_frames, interval=interval_ms, blit=False)
 
 ffmpeg_path = imageio_ffmpeg.get_ffmpeg_exe()
 plt.rcParams["animation.ffmpeg_path"] = ffmpeg_path
-writer = FFMpegWriter(fps=2, codec="h264", bitrate=1500, extra_args=["-pix_fmt", "yuv420p"])
+writer = FFMpegWriter(fps=fps, codec="h264", bitrate=2000, extra_args=["-pix_fmt", "yuv420p"])
 out_path = DATA / "animation_low.mp4"
 anim.save(str(out_path), writer=writer, dpi=100)
 plt.close(fig)
 
 size_mb = out_path.stat().st_size / 1024 / 1024
 print(f"\nDone: {out_path}")
-print(f"  Frames: {n_frames}, Duration: {n_frames/2:.0f}s, 2fps")
+print(f"  Frames: {n_frames}, Duration: {n_frames/fps:.0f}s, {fps}fps")
 print(f"  t range: [{sampled_t[0]}..{sampled_t[-1]}]")
 print(f"  Size: {size_mb:.1f} MB")

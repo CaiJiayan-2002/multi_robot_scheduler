@@ -93,18 +93,6 @@ class FootprintValidator:
         else:
             return False, f"非法位移: delta=({dx},{dy})，必须是单步动作或等待"
 
-        # —— 水平移动限制 ——————————————————————————
-        if action in (Action.LEFT, Action.RIGHT):
-            if not (
-                from_anchor.y >= trunk_y_threshold
-                and to_anchor.y >= trunk_y_threshold
-            ):
-                return (
-                    False,
-                    f"水平移动 ({action.name}) 仅允许在主干道 y>={trunk_y_threshold}，"
-                    f"当前 from_y={from_anchor.y}, to_y={to_anchor.y}",
-                )
-
         # —— 目标姿态合法性 ————————————————————————
         if not FootprintValidator.is_valid_pose(to_anchor, footprint, terrain):
             return False, f"目标姿态无效: anchor=({to_anchor.x},{to_anchor.y})"

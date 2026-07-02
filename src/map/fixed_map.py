@@ -22,11 +22,11 @@ class FixedMap:
 
     # — 地图几何常量 ——————————————————————————————
     WIDTH: int = 25
-    HEIGHT: int = 29
-    INTERNAL_ROWS = (1, 23)  # 1-indexed, inclusive
-    TRUNK_ROWS = (24, 29)
-    OBSTACLE_COLUMNS = (4, 10, 16, 22)  # 1-indexed
-    TRUNK_Y_THRESHOLD: int = 24
+    HEIGHT: int = 31  # 扩展2行：主干道8行(24-31)
+    INTERNAL_ROWS = (1, 23)  # 不变
+    TRUNK_ROWS = (24, 31)
+    OBSTACLE_COLUMNS = (4, 10, 16, 22)  # 不变
+    TRUNK_Y_THRESHOLD: int = 24  # 不变
 
     # — 离心机布局常量 ————————————————————————————
     MACHINE_ROWS = (3, 7, 11, 15, 19, 23)

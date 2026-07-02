@@ -97,7 +97,7 @@ def main():
         robots=robot_specs,
         schedule=schedule,
     )
-    engine.run(max_steps=30000)
+    engine.run(max_steps=60000)
     timing["simulation"] = time.perf_counter() - t_sim
     timing["total_wall"] = time.perf_counter() - t0
 

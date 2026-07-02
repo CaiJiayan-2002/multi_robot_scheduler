@@ -1,34 +1,34 @@
 {
   "scenario": "1A1B",
-  "makespan": 3217,
+  "makespan": 3222,
   "path_length": {
     "total": 3915,
     "by_robot": {
-      "A_1": 2595,
-      "B_1": 1320
+      "A_1": 2603,
+      "B_1": 1312
     },
     "by_type": {
-      "A": 2595,
-      "B": 1320
+      "A": 2603,
+      "B": 1312
     }
   },
   "wait_times": {
     "total_precedence": 2,
-    "total_conflict": 8,
-    "total_idle": 1320,
-    "total": 1322,
+    "total_conflict": 25,
+    "total_idle": 1350,
+    "total": 1359,
     "by_robot": {
       "A_1": {
         "precedence": 0,
-        "conflict": 8,
+        "conflict": 18,
         "idle": 0,
         "total": 0
       },
       "B_1": {
         "precedence": 2,
-        "conflict": 0,
-        "idle": 1320,
-        "total": 1322
+        "conflict": 7,
+        "idle": 1350,
+        "total": 1359
       }
     }
   },
@@ -39,14 +39,14 @@
   },
   "utilization": {
     "A_1": {
-      "service_utilization_pct": 17.9,
-      "movement_utilization_pct": 84.8,
+      "service_utilization_pct": 17.88,
+      "movement_utilization_pct": 84.08,
       "wait_ratio_pct": 0.0
     },
     "B_1": {
-      "service_utilization_pct": 14.92,
-      "movement_utilization_pct": 43.99,
-      "wait_ratio_pct": 41.09
+      "service_utilization_pct": 14.9,
+      "movement_utilization_pct": 42.92,
+      "wait_ratio_pct": 42.18
     }
   },
   "load_balance": {
@@ -56,13 +56,13 @@
     "gap_b": 0.0
   },
   "timing": {
-    "map_preprocess": 0.049,
+    "map_preprocess": 0.0664,
     "solver": 0.0001,
-    "simulation": 10.0517,
-    "total_wall": 10.1008
+    "simulation": 4.9816,
+    "total_wall": 5.0481
   },
   "planning_quality": {
-    "replans": 8,
+    "replans": 25,
     "solver_status": "feasible",
     "fallback_used": true
   },

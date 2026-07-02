@@ -121,24 +121,22 @@ class ReservationTable:
     # 查询方法
     # ==================================================================
 
+    @staticmethod
+    def _is_self(exclude_robot: str | None, robot_id: str) -> bool:
+        """检查 robot_id 是否属于 exclude_robot 自身（含 _STATIC_ 临时预约）。"""
+        if exclude_robot is None:
+            return False
+        return robot_id == exclude_robot or robot_id == f"_STATIC_{exclude_robot}"
+
     def is_pose_free(
         self,
         t: int,
         cells: frozenset[Cell],
         exclude_robot: str | None = None,
     ) -> bool:
-        """检查时间t的pose占用是否空闲。
-
-        Args:
-            t: 时间步
-            cells: 要检查的格子集合
-            exclude_robot: 排除的机器人ID（自己的预约不算冲突）
-
-        Returns:
-            True 如果空闲
-        """
+        """检查时间t的pose占用是否空闲。"""
         for occupied_cells, robot_id in self.pose_cells_by_time.get(t, {}).items():
-            if exclude_robot and robot_id == exclude_robot:
+            if self._is_self(exclude_robot, robot_id):
                 continue
             if cells & occupied_cells:
                 return False
@@ -170,7 +168,7 @@ class ReservationTable:
             if t_start >= s_end or t_end <= s_start:
                 continue
             for occ_cells, robot_id in occupied_cells_dict.items():
-                if exclude_robot and robot_id == exclude_robot:
+                if self._is_self(exclude_robot, robot_id):
                     continue
                 if cells & occ_cells:
                     return False
@@ -195,7 +193,7 @@ class ReservationTable:
             True 如果空闲
         """
         for lock_start, lock_end, robot_id in self.service_locks.get(machine_id, []):
-            if exclude_robot and robot_id == exclude_robot:
+            if self._is_self(exclude_robot, robot_id):
                 continue
             if t_start < lock_end and t_end > lock_start:
                 return False
@@ -223,7 +221,7 @@ class ReservationTable:
         """
         conflicts: list[str] = []
         for occupied_cells, robot_id in self.pose_cells_by_time.get(t, {}).items():
-            if exclude_robot and robot_id == exclude_robot:
+            if self._is_self(exclude_robot, robot_id):
                 continue
             if cells & occupied_cells:
                 conflicts.append(robot_id)
@@ -255,7 +253,7 @@ class ReservationTable:
             if t_start >= s_end or t_end <= s_start:
                 continue
             for occ_cells, robot_id in occupied_cells_dict.items():
-                if exclude_robot and robot_id == exclude_robot:
+                if self._is_self(exclude_robot, robot_id):
                     continue
                 if robot_id in conflicts:
                     continue

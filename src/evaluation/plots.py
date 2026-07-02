@@ -123,11 +123,27 @@ class TrajectoryPlot:
         r'^([AB]_\d+):\s*->\s*\((\d+),(\d+)\)\s*t=(\d+)\s*(\w+)'
     )
 
+    MOVE_RE = re.compile(
+        r'^([AB]_\d+):\s*->\s*\((\d+),(\d+)\)\s*t=(\d+)\s*(\w+)'
+    )
+    WORK_START_RE = re.compile(
+        r'^([AB]_\d+): start (\w+) on (M_y\d+_x\d+)'
+    )
+    WORK_COMPLETE_RE = re.compile(
+        r'^([AB]_\d+): completed'
+    )
+
     @staticmethod
     def build_trajectory_data(event_log: list[dict]) -> dict:
-        """从事件日志提取轨迹。"""
+        """从事件日志提取轨迹，包括工作期间的静止位置。
+
+        工作期间机器人保持在同一位置，但没有 move 事件。
+        如果不补全，轨迹数据会有缺口，导致动画中机器人在
+        离心机状态变化时出现在错误位置。
+        """
         trajectories: dict[str, list[dict]] = {}
 
+        # Step 1: 提取所有 move 事件
         for e in event_log:
             if e.get("type") != "move":
                 continue
@@ -138,6 +154,66 @@ class TrajectoryPlot:
             trajectories.setdefault(rid, []).append({
                 "t": t, "x": x, "y": y, "action": action,
             })
+
+        # Step 2: 找出工作期间并补全位置
+        work_periods: dict[str, list[tuple[int, int, int, int]]] = {}
+        # rid -> [(start_t, end_t, x, y), ...]
+        pending_work: dict[str, tuple[int, int, int]] = {}
+        # rid -> (start_t, x, y) from last move before work
+
+        # 先为每个机器人建立时间->位置的索引（从move事件）
+        pos_by_time: dict[str, dict[int, tuple[int, int]]] = {}
+        for rid, pts in trajectories.items():
+            pos_by_time[rid] = {p["t"]: (p["x"], p["y"]) for p in pts}
+
+        # 从work_start/work_complete事件找出工作区间
+        for e in event_log:
+            msg = e.get("message", "")
+            etype = e.get("type", "")
+            t = e.get("t", 0)
+
+            if etype == "work_start":
+                wm = TrajectoryPlot.WORK_START_RE.match(msg)
+                if wm:
+                    rid = wm.group(1)
+                    # 找到最后一个已知位置（到达service anchor的位置）
+                    if rid in pos_by_time:
+                        # 找到 <= t 的最近位置
+                        known_times = sorted([kt for kt in pos_by_time[rid] if kt <= t])
+                        if known_times:
+                            last_t = known_times[-1]
+                            x, y = pos_by_time[rid][last_t]
+                            pending_work[rid] = (t, x, y)
+
+            elif etype == "work_complete":
+                wm = TrajectoryPlot.WORK_COMPLETE_RE.match(msg)
+                if wm:
+                    rid = wm.group(1)
+                    if rid in pending_work:
+                        start_t, x, y = pending_work.pop(rid)
+                        work_periods.setdefault(rid, []).append(
+                            (start_t, t, x, y)
+                        )
+
+        # Step 3: 将工作期间的位置插入轨迹
+        for rid, periods in work_periods.items():
+            if rid not in trajectories:
+                continue
+            traj = trajectories[rid]
+            # 建立已存在的时间集合
+            existing_times = {p["t"] for p in traj}
+            new_points = []
+            for start_t, end_t, x, y in periods:
+                # 在 start_t+1 到 end_t（含）之间添加位置点
+                for wt in range(start_t + 1, end_t + 1):
+                    if wt not in existing_times:
+                        new_points.append({
+                            "t": wt, "x": x, "y": y, "action": "WORK",
+                        })
+                        existing_times.add(wt)
+            traj.extend(new_points)
+            # 按时间重新排序
+            traj.sort(key=lambda p: p["t"])
 
         return trajectories
 

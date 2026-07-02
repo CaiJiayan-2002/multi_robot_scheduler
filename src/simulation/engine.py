@@ -235,7 +235,7 @@ class SimulationEngine:
             "B_1": RobotSpec(
                 robot_id="B_1",
                 robot_type=RobotType.B,
-                start_anchor=Cell(24, 24),  # 主干道右侧
+                start_anchor=Cell(24, 28),  # 主干道右下角（避开A_1所有corridor）
             ),
         }
 
@@ -407,14 +407,21 @@ class SimulationEngine:
                 self.state_machine.unlock_machine(operation.machine_id)
                 continue
 
-            # 规划路径（仅含移动，服务时间由 work_remaining 处理）
-            path = self.space_time_astar.plan(
-                start_anchor=robot.current_anchor,
-                goal_anchor=goal_anchor,
-                start_time=self.current_time,
-                max_time=self._max_steps,
-                robot_id=rid,
-            )
+            # 规划路径
+            # 作业约束：换列必须经过主干道
+            same_column = (robot.current_anchor.x == goal_anchor.x)
+            if same_column:
+                path = self.space_time_astar.plan(
+                    start_anchor=robot.current_anchor,
+                    goal_anchor=goal_anchor,
+                    start_time=self.current_time,
+                    max_time=self._max_steps,
+                    robot_id=rid,
+                )
+            else:
+                trunk_y = self.pose_graph.trunk_y_threshold
+                trunk_wp = Cell(goal_anchor.x, trunk_y)
+                path = self._plan_two_legs(robot.current_anchor, trunk_wp, goal_anchor, self.current_time, rid)
 
             if path is None:
                 self._log_event("planning_failed",
@@ -432,6 +439,14 @@ class SimulationEngine:
                 self.state_machine.unlock_machine(operation.machine_id)
                 robot.status = RobotStatus.WAITING_CONFLICT
                 continue
+
+            # *** 提前预约工作区 ***
+            # 规划时立即预约未来的工作时间，让其他机器人的
+            # SpaceTimeA* 能预见并自然绕行。
+            work_cells = self.footprint.cells_at(goal_anchor)
+            for dt in range(operation.duration):
+                t = path[-1].t + dt
+                self.reservation_table.pose_cells_by_time[t][work_cells] = rid
 
             # 设置运行时状态
             robot.current_path = path
@@ -495,6 +510,19 @@ class SimulationEngine:
     # 内部方法：返回起点
     # ==================================================================
 
+    def _plan_two_legs(self, start: Cell, waypoint: Cell, goal: Cell,
+                       start_time: int, rid: str) -> list[TimedPose] | None:
+        """两段规划: start → waypoint(主干道) → goal。"""
+        leg1 = self.space_time_astar.plan(start, waypoint, start_time,
+                                          self._max_steps, robot_id=rid)
+        if leg1 is None:
+            return None
+        leg2 = self.space_time_astar.plan(waypoint, goal, leg1[-1].t,
+                                          self._max_steps, robot_id=rid)
+        if leg2 is None:
+            return None
+        return leg1 + leg2[1:]  # 去掉 leg2 的 START
+
     def _plan_return_to_start(self, rid: str, robot: RobotRuntime) -> None:
         """所有任务完成，规划返回起点路径。"""
         start_anchor = robot.spec.start_anchor
@@ -516,18 +544,14 @@ class SimulationEngine:
         )
 
         if path is None:
-            robot.finished = True
-            robot.status = RobotStatus.FINISHED
-            self._log_event("robot_finished",
-                f"{rid}: cannot return to start, finishing at ({cur.x},{cur.y})")
+            self._log_event("return_to_start",
+                f"{rid}: cannot plan return path, will retry")
             return
 
-        if not self.space_time_astar.reserve_path(path, rid, None):
-            robot.finished = True
-            robot.status = RobotStatus.FINISHED
-            self._log_event("robot_finished",
-                f"{rid}: cannot reserve return path")
-            return
+        # 返回起点使用 force-reserve：回家有最高优先权
+        for pose in path:
+            cells = self.footprint.cells_at(Cell(pose.x, pose.y))
+            self.reservation_table.pose_cells_by_time[pose.t][cells] = rid
 
         robot.current_path = path
         robot.path_index = 0
@@ -618,6 +642,10 @@ class SimulationEngine:
                 pose = action["pose"]
                 robot.current_anchor = Cell(pose.x, pose.y)
                 robot.path_index = action["path_index"] + 1
+
+                # 路径可能已被其他机器人无效化
+                if robot.current_path is None:
+                    continue
 
                 # 检查是否到达路径末尾
                 if robot.path_index >= len(robot.current_path):
