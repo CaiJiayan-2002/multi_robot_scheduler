@@ -278,6 +278,12 @@ class SimulationEngine:
         # 3. 提交动作到预约表并执行
         self._execute_actions(next_actions)
 
+        # *** 碰撞检测 ***
+        collisions = self._check_collisions()
+        if collisions:
+            for c in collisions:
+                self._log_event("collision", c)
+
         # 4. 更新工作进度
         self._update_work_progress()
 
@@ -318,11 +324,44 @@ class SimulationEngine:
         return self.event_log
 
     # ==================================================================
+    # 碰撞检测
+    # ==================================================================
+
+    def _check_collisions(self) -> list[str]:
+        """检查所有机器人对之间的 footprint 重叠。
+
+        Returns:
+            碰撞描述列表（空列表 = 无碰撞）
+        """
+        collisions: list[str] = []
+        robot_list = [(rid, r) for rid, r in self.robots.items()
+                      if r.current_anchor is not None and not r.finished]
+
+        for i in range(len(robot_list)):
+            rid_a, robot_a = robot_list[i]
+            cells_a = self.footprint.cells_at(robot_a.current_anchor)
+            for j in range(i + 1, len(robot_list)):
+                rid_b, robot_b = robot_list[j]
+                cells_b = self.footprint.cells_at(robot_b.current_anchor)
+                overlap = cells_a & cells_b
+                if overlap:
+                    overlap_list = [(c.x, c.y) for c in overlap]
+                    collisions.append(
+                        f"COLLISION t={self.current_time}: {rid_a}@{robot_a.current_anchor} "
+                        f"vs {rid_b}@{robot_b.current_anchor}, "
+                        f"cells={overlap_list}"
+                    )
+        return collisions
+
+    # ==================================================================
     # 内部方法：规划
     # ==================================================================
 
     def _plan_idle_robots(self) -> None:
         """为所有 IDLE 状态的机器人规划下一个任务的路径。"""
+        # *** 注入静止机器人位置到预约表 ***
+        temp_count = self._inject_static_robots()
+
         for rid, robot in self.robots.items():
             if robot.status != RobotStatus.IDLE or robot.finished:
                 continue
@@ -368,14 +407,11 @@ class SimulationEngine:
                 self.state_machine.unlock_machine(operation.machine_id)
                 continue
 
-            # 规划路径（含服务时间）
-            path = self.space_time_astar.plan_with_service(
+            # 规划路径（仅含移动，服务时间由 work_remaining 处理）
+            path = self.space_time_astar.plan(
                 start_anchor=robot.current_anchor,
                 goal_anchor=goal_anchor,
                 start_time=self.current_time,
-                service_duration=operation.duration,
-                machine_id=operation.machine_id,
-                operation_id=next_op_id,
                 max_time=self._max_steps,
                 robot_id=rid,
             )
@@ -408,6 +444,52 @@ class SimulationEngine:
                 f"{rid}: planned path to {operation.machine_id} "
                 f"({operation.operation_type.value}), "
                 f"arrival_time={path[-1].t}, path_len={len(path)}")
+
+        # *** 清理临时注入的静止机器人预约 ***
+        self.reservation_table.release_by_prefix("_STATIC_")
+
+    def _invalidate_conflicting_paths(self, reserved_rid: str) -> None:
+        """检查新预约是否使其他机器人的已规划路径失效。"""
+        for other_rid, other_robot in self.robots.items():
+            if other_rid == reserved_rid or other_robot.finished:
+                continue
+            if other_robot.current_path is None:
+                continue
+            for i in range(other_robot.path_index, len(other_robot.current_path)):
+                pose = other_robot.current_path[i]
+                cells = self.footprint.cells_at(Cell(pose.x, pose.y))
+                conflicts = self.reservation_table.get_conflicts_at(pose.t, cells)
+                other_conflicts = [c for c in conflicts if c != other_rid]
+                if other_conflicts:
+                    self.reservation_table.release_future(other_rid, self.current_time)
+                    other_robot.current_path = None
+                    if other_robot.status != RobotStatus.WORKING:
+                        other_robot.status = RobotStatus.IDLE
+                    self._log_event("conflict_detected",
+                        f"{other_rid}: path invalidated by {reserved_rid} at t={pose.t}")
+                    break
+
+    def _inject_static_robots(self) -> int:
+        """将静止且不会在本次规划中移动的机器人的位置注入预约表。
+
+        IDLE 机器人会在 _plan_idle_robots 中重新规划，不需要注入。
+        真正需要注入的是 WORKING/FINISHED/WAITING_PRECEDENCE 等
+        不会在本次循环中移动的机器人。
+        """
+        count = 0
+        for rid, robot in self.robots.items():
+            if robot.current_anchor is None:
+                continue
+            if robot.status in (RobotStatus.WORKING, RobotStatus.FINISHED):
+                cells = self.footprint.cells_at(robot.current_anchor)
+                duration = (robot.work_remaining + 2) if robot.work_remaining > 0 else 5
+                for dt in range(duration):
+                    t = self.current_time + dt
+                    self.reservation_table.reserve_pose_range(
+                        t, t + 1, cells, f"_STATIC_{rid}"
+                    )
+                    count += 1
+        return count
 
     # ==================================================================
     # 内部方法：返回起点
@@ -547,12 +629,22 @@ class SimulationEngine:
                         robot.current_path = None
                         self._log_event("robot_finished",
                             f"{rid}: arrived at start, all tasks done")
-                    # 作业从下一个时间步开始
+                    # 作业开始：预约整个作业期间的本体占用
                     elif robot.current_op_id:
                         op = self.operations.get(robot.current_op_id)
                         if op:
                             robot.work_remaining = op.duration
                             robot.status = RobotStatus.WORKING
+                            # 立即预约工作期间完整 2x4 本体
+                            work_cells = self.footprint.cells_at(
+                                Cell(pose.x, pose.y)
+                            )
+                            for dt in range(op.duration):
+                                self.reservation_table.reserve_pose(
+                                    pose.t + dt, work_cells, rid
+                                )
+                            # 检查其他机器人的路径是否因此失效
+                            self._invalidate_conflicting_paths(rid)
                             self._log_event("work_start",
                                 f"{rid}: start {op.operation_type.value} "
                                 f"on {op.machine_id}, duration={op.duration}")

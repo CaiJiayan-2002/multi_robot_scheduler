@@ -264,6 +264,67 @@ class ReservationTable:
         return conflicts
 
     # ==================================================================
+    # 临时预约管理（用于注入静止机器人位置）
+    # ==================================================================
+
+    def reserve_pose_range(
+        self,
+        t_start: int,
+        t_end: int,
+        cells: frozenset[Cell],
+        robot_id: str,
+    ) -> list[tuple[int, frozenset[Cell], str]]:
+        """在 [t_start, t_end) 范围内预约某机器人的占用。
+
+        用于在规划前注入静止机器人（IDLE/WORKING/FINISHED）的位置，
+        使 SpaceTimeA* 能避开它们。
+
+        Args:
+            t_start: 开始时间（含）
+            t_end: 结束时间（不含）
+            cells: 占用格子集合
+            robot_id: 机器人ID（建议使用带前缀的标识如 "_STATIC_A_1"）
+
+        Returns:
+            成功预约的 (t, cells, robot_id) 列表，供后续释放
+        """
+        reserved: list[tuple[int, frozenset[Cell], str]] = []
+        for t in range(t_start, t_end):
+            # 使用 force 语义：不检查冲突，直接覆盖式预约
+            # （临时预约在规划完成后会被清理）
+            self.pose_cells_by_time[t][cells] = robot_id
+            reserved.append((t, cells, robot_id))
+        return reserved
+
+    def release_by_prefix(self, prefix: str = "_STATIC_") -> int:
+        """释放所有 robot_id 以指定前缀开头的预约。
+
+        Args:
+            prefix: 机器人ID前缀，默认 "_STATIC_"
+
+        Returns:
+            释放的预约条目数量
+        """
+        count = 0
+
+        # 释放 pose 预约
+        times_to_remove: list[int] = []
+        for t in self.pose_cells_by_time:
+            cells_to_remove: list[frozenset[Cell]] = []
+            for cells, rid in self.pose_cells_by_time[t].items():
+                if rid.startswith(prefix):
+                    cells_to_remove.append(cells)
+                    count += 1
+            for cells in cells_to_remove:
+                del self.pose_cells_by_time[t][cells]
+            if not self.pose_cells_by_time[t]:
+                times_to_remove.append(t)
+        for t in times_to_remove:
+            del self.pose_cells_by_time[t]
+
+        return count
+
+    # ==================================================================
     # 释放与清理
     # ==================================================================
 

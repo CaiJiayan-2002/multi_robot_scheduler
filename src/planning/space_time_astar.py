@@ -90,13 +90,12 @@ class SpaceTimeAStar:
             成功: list[TimedPose] 从start_time到到达时间的完整姿态序列
             失败: None（超时或不可达）
         """
-        # 检查缓存
-        cache_key = (start_anchor, goal_anchor, start_time)
-        if cache_key in self._path_cache:
-            self._cache_hits += 1
-            return self._path_cache[cache_key][0]
-
-        self._cache_misses += 1
+        # 路径缓存已禁用 — 多机器人场景下，预约表随时变化，
+        # 缓存路径可能在新的预约下失效，导致碰撞。
+        # cache_key = (start_anchor, goal_anchor, start_time)
+        # if cache_key in self._path_cache:
+        #     self._cache_hits += 1
+        #     return self._path_cache[cache_key][0]
 
         # 验证起点终点
         if not self._graph.is_valid_pose(start_anchor):
@@ -110,9 +109,7 @@ class SpaceTimeAStar:
         )
 
         if result is not None:
-            path, cost = result
-            self._path_cache[cache_key] = (path, cost)
-            return path
+            return result[0]  # path
         return None
 
     def plan_with_service(
