@@ -1,17 +1,10 @@
 """
 场景1 (1A1B) 完整运行 — 输出全部10项评价指标 + 可视化
 
-输出:
-1. 机器人运行轨迹动画 (HTML)
-2. 机器人任务甘特图 (PNG + HTML)
-3. 作业总时间
-4. 单机器人与系统总路径长度
-5. 各类等待时间
-6. 碰撞、约束违规次数
-7. 各机器人利用率
-8. 负载均衡指标
-9. 算法计算时间
-10. 结果汇总 JSON
+用法: python run_scenario_1_full.py [experiment_name]
+默认: 260702_test2
+
+输出目录: outputs/scenario_1/{experiment_name}/
 """
 from __future__ import annotations
 
@@ -189,8 +182,11 @@ def main():
     # ==================================================================
     # 6. 生成可视化
     # ==================================================================
-    output_dir = Path(__file__).resolve().parent.parent / "outputs" / "scenario_1"
+    experiment_name = sys.argv[1] if len(sys.argv) > 1 else "260702_test2"
+    output_dir = Path(__file__).resolve().parent.parent / "outputs" / "scenario_1" / experiment_name
     output_dir.mkdir(parents=True, exist_ok=True)
+    print(f"\nExperiment: {experiment_name}")
+    print(f"Output:     {output_dir}\n")
 
     # 甘特图
     print(f"\n{'=' * 70}")

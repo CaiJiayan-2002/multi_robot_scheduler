@@ -1,7 +1,7 @@
 """
-场景1 机器人运行动画 v2
-- 修复: 机器人初始位置 + 离心机状态变化 + t0=1
-- 10 fps, GIF 输出
+场景1 机器人运行动画 v3
+- MP4 输出 (H.264), 10 fps, t0=1
+- 输入: trajectories.json + event_log.jsonl
 """
 from __future__ import annotations
 
@@ -17,11 +17,14 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 from matplotlib.patches import Rectangle
-from matplotlib.animation import FuncAnimation, PillowWriter
+from matplotlib.animation import FuncAnimation, FFMpegWriter
 
 
 PROJECT = Path(__file__).resolve().parent.parent
-OUTPUT_DIR = PROJECT / "outputs" / "scenario_1"
+import sys
+exp_name = sys.argv[1] if len(sys.argv) > 1 else "260702_test2"
+OUTPUT_DIR = PROJECT / "outputs" / "scenario_1" / exp_name
+print(f"Reading data from: {OUTPUT_DIR}")
 
 
 def load_all():
@@ -340,17 +343,24 @@ def main():
         interval=100, blit=False,
     )
 
-    output_path = OUTPUT_DIR / "animation.gif"
-    writer = PillowWriter(fps=10)
-    anim.save(str(output_path), writer=writer, dpi=90)
+    output_path = OUTPUT_DIR / "animation.mp4"
+    import imageio_ffmpeg
+    ffmpeg_path = imageio_ffmpeg.get_ffmpeg_exe()
+    plt.rcParams["animation.ffmpeg_path"] = ffmpeg_path
+
+    writer = FFMpegWriter(
+        fps=10, codec="h264", bitrate=2000,
+        extra_args=["-pix_fmt", "yuv420p"],
+    )
+    anim.save(str(output_path), writer=writer, dpi=100)
     plt.close(fig)
 
     size_mb = output_path.stat().st_size / 1024 / 1024
-    print(f"\n[DONE] {output_path}")
+    print(f"\n[DONE] Animation: {output_path}")
+    print(f"  Format: MP4 (H.264), FPS: 10")
     print(f"  Frames: {n_frames}, Duration: {n_frames/10:.0f}s")
-    print(f"  t range: [{t_start}..{t_end}], FPS: 10")
+    print(f"  t range: [{t_start}..{t_end}]")
     print(f"  Size: {size_mb:.1f} MB")
-    print(f"  Sim speed: ~{sample_step*10} timesteps/sec")
 
 
 if __name__ == "__main__":
