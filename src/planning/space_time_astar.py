@@ -206,6 +206,9 @@ class SpaceTimeAStar:
         2. 每个非 WAIT 转移的扫掠区域
         3. 如果提供 machine_id，预约作业期间的服务锁
 
+        预约成功后清除路径缓存，确保其他机器人不会复用在新预约下
+        已失效的旧路径。
+
         Args:
             path: 规划的路径
             robot_id: 机器人ID
@@ -249,6 +252,8 @@ class SpaceTimeAStar:
                         self._reservations.release_future(robot_id, path[0].t)
                         return False
 
+        # 清除路径缓存：新预约可能使其他机器人的缓存路径失效
+        self._path_cache.clear()
         return True
 
     # ==================================================================

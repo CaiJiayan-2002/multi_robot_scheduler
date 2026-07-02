@@ -284,10 +284,13 @@ class SimulationEngine:
         # 5. 推进时间
         self.current_time += 1
 
-        # 6. 检查终止条件
+        # 6. 检查终止条件（机器全完成 + 机器人全归位）
         if self.state_machine.all_completed():
-            self._running = False
-            self._log_event("simulation_end", "All centrifuges completed (state=10)")
+            all_home = all(r.finished for r in self.robots.values())
+            if all_home:
+                self._running = False
+                self._log_event("simulation_end",
+                    "All centrifuges completed and all robots returned to start")
 
         if self.current_time >= self._max_steps:
             self._running = False
@@ -325,9 +328,8 @@ class SimulationEngine:
                 continue
 
             if not robot.assigned_ops:
-                robot.finished = True
-                robot.status = RobotStatus.FINISHED
-                self._log_event("robot_finished", f"{rid} no tasks remaining, finished")
+                # *** 所有任务完成：规划返回起点 ***
+                self._plan_return_to_start(rid, robot)
                 continue
 
             # 获取下一个操作
@@ -406,6 +408,52 @@ class SimulationEngine:
                 f"{rid}: planned path to {operation.machine_id} "
                 f"({operation.operation_type.value}), "
                 f"arrival_time={path[-1].t}, path_len={len(path)}")
+
+    # ==================================================================
+    # 内部方法：返回起点
+    # ==================================================================
+
+    def _plan_return_to_start(self, rid: str, robot: RobotRuntime) -> None:
+        """所有任务完成，规划返回起点路径。"""
+        start_anchor = robot.spec.start_anchor
+        cur = robot.current_anchor
+
+        if cur is None or cur == start_anchor:
+            robot.finished = True
+            robot.status = RobotStatus.FINISHED
+            self._log_event("robot_finished",
+                f"{rid}: all done, already at start")
+            return
+
+        path = self.space_time_astar.plan(
+            start_anchor=cur,
+            goal_anchor=start_anchor,
+            start_time=self.current_time,
+            max_time=self._max_steps,
+            robot_id=rid,
+        )
+
+        if path is None:
+            robot.finished = True
+            robot.status = RobotStatus.FINISHED
+            self._log_event("robot_finished",
+                f"{rid}: cannot return to start, finishing at ({cur.x},{cur.y})")
+            return
+
+        if not self.space_time_astar.reserve_path(path, rid, None):
+            robot.finished = True
+            robot.status = RobotStatus.FINISHED
+            self._log_event("robot_finished",
+                f"{rid}: cannot reserve return path")
+            return
+
+        robot.current_path = path
+        robot.path_index = 0
+        robot.current_op_id = "__RETURN__"
+        robot.status = RobotStatus.MOVING
+        self._log_event("return_to_start",
+            f"{rid}: returning to start ({start_anchor.x},{start_anchor.y}), "
+            f"path={len(path)} steps, arrival_t={path[-1].t}")
 
     # ==================================================================
     # 内部方法：动作收集与执行
@@ -491,8 +539,16 @@ class SimulationEngine:
 
                 # 检查是否到达路径末尾
                 if robot.path_index >= len(robot.current_path):
+                    # 返回起点完成
+                    if robot.current_op_id == "__RETURN__":
+                        robot.finished = True
+                        robot.status = RobotStatus.FINISHED
+                        robot.current_op_id = None
+                        robot.current_path = None
+                        self._log_event("robot_finished",
+                            f"{rid}: arrived at start, all tasks done")
                     # 作业从下一个时间步开始
-                    if robot.current_op_id:
+                    elif robot.current_op_id:
                         op = self.operations.get(robot.current_op_id)
                         if op:
                             robot.work_remaining = op.duration
