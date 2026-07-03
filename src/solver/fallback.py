@@ -259,6 +259,92 @@ def manual_assign_multi_robot(
     return result
 
 
+def manual_assign_scenario_2(
+    machines: dict[str, Machine],
+    operations: dict[str, Operation],
+    robots: dict[str, RobotSpec],
+) -> ScheduleResult:
+    """2A1B 手工分区流水线。
+
+    A_1 负责交错列 x=(2,8,14,20)，A_2 负责交错列
+    x=(5,11,17,23)。各列由上到下；B_1 按相同分区顺序跟随检查。
+    """
+    a_robots = sorted(
+        rid for rid, robot in robots.items() if robot.robot_type == RobotType.A
+    )
+    b_robots = sorted(
+        rid for rid, robot in robots.items() if robot.robot_type == RobotType.B
+    )
+    if len(a_robots) != 2 or len(b_robots) != 1:
+        return manual_assign_multi_robot(machines, operations, robots)
+
+    column_groups = ((2, 8, 14, 20), (5, 11, 17, 23))
+    machine_groups: list[list[str]] = []
+    for columns in column_groups:
+        group = sorted(
+            (
+                mid for mid, machine in machines.items()
+                if machine.cells[0].x in columns
+            ),
+            key=lambda mid: (
+                columns.index(machines[mid].cells[0].x), machines[mid].row
+            ),
+        )
+        machine_groups.append(group)
+
+    result = ScheduleResult(
+        status=ResultStatus.FEASIBLE.value,
+        objective={
+            "method": "manual_2a1b_partition_pipeline",
+            "column_groups": [list(group) for group in column_groups],
+        },
+        fallback_used=True,
+    )
+
+    for rid, machine_ids in zip(a_robots, machine_groups):
+        # 每列拆卸自上而下；安装自下而上。B 检查完一整列并从底部
+        # 离开后，A 再从底部向上收尾，避免单列通道内迎面相遇。
+        install_machine_ids = [
+            mid
+            for offset in range(0, len(machine_ids), 6)
+            for mid in reversed(machine_ids[offset:offset + 6])
+        ]
+        op_ids = (
+            [f"{mid}_D" for mid in machine_ids]
+            + [f"{mid}_R" for mid in install_machine_ids]
+        )
+        result.robot_schedules[rid] = RobotSchedule(
+            robot_id=rid,
+            operations=[(op_id, -1, -1) for op_id in op_ids],
+        )
+        for op_id in op_ids:
+            op = operations[op_id]
+            result.assignments.append({
+                "operation_id": op_id,
+                "robot_id": rid,
+                "machine_id": op.machine_id,
+                "operation_type": op.operation_type.value,
+            })
+
+    b_id = b_robots[0]
+    inspection_ids = [
+        f"{mid}_I" for machine_ids in machine_groups for mid in machine_ids
+    ]
+    result.robot_schedules[b_id] = RobotSchedule(
+        robot_id=b_id,
+        operations=[(op_id, -1, -1) for op_id in inspection_ids],
+    )
+    for op_id in inspection_ids:
+        op = operations[op_id]
+        result.assignments.append({
+            "operation_id": op_id,
+            "robot_id": b_id,
+            "machine_id": op.machine_id,
+            "operation_type": op.operation_type.value,
+        })
+    return result
+
+
 def manual_assign(
     problem: SchedulingProblem,
 ) -> ScheduleResult:
@@ -279,6 +365,10 @@ def manual_assign(
 
     if a_count == 1 and b_count <= 1:
         return manual_assign_scenario_1(
+            problem.machines, problem.operations, problem.robots
+        )
+    elif a_count == 2 and b_count == 1:
+        return manual_assign_scenario_2(
             problem.machines, problem.operations, problem.robots
         )
     else:

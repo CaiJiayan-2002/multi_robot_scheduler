@@ -145,11 +145,16 @@ for mid, m in machines_dict.items():
         machine_rects[key] = rect
 
 # Robot patches (hidden initially)
-robot_colors = {"A_1": "#1565c0", "B_1": "#2e7d32"}
+robot_colors = {
+    "A_1": "#1565c0",
+    "A_2": "#7b1fa2",
+    "B_1": "#2e7d32",
+}
 robot_rects: dict[str, Rectangle] = {}
 robot_wz_rects: dict[str, Rectangle] = {}  # work zone highlight
 for rid in trajectories:
-    robot_rects[rid] = Rectangle((-10, -10), 2, 4, facecolor=robot_colors[rid],
+    color = robot_colors.get(rid, "#616161")
+    robot_rects[rid] = Rectangle((-10, -10), 2, 4, facecolor=color,
                                   edgecolor="#111", linewidth=1.5, alpha=0.9, zorder=10)
     ax.add_patch(robot_rects[rid])
     # Work zone highlight (top 2 cells of footprint)
@@ -163,7 +168,7 @@ trails: dict[str, tuple[list,list]] = {}
 trail_lines: dict[str, object] = {}
 for rid in trajectories:
     trails[rid] = ([], [])
-    (line,) = ax.plot([], [], color=robot_colors[rid], linewidth=1.2, alpha=0.3, zorder=5)
+    (line,) = ax.plot([], [], color=robot_colors.get(rid, "#616161"), linewidth=1.2, alpha=0.3, zorder=5)
     trail_lines[rid] = line
 
 # State count text
