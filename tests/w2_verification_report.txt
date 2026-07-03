@@ -1,0 +1,273 @@
+======================================================================
+  Multi-Robot Scheduler v4.0 - Week 2 Verification Report
+  Date: 2026-07-01
+  Agent: Agent2 (Test Inspector)
+======================================================================
+
+=== Test Results Summary ============================================
+
+Total:     149 tests
+Passed:    149 (100%)
+Failed:    0
+Errors:    0
+Duration:  ~41s
+
+=== W1 Regression (54 tests) =======================================
+
+test_fixed_map.py:      21 passed  (map dimensions, obstacles, trunk, machines, operations)
+test_footprint.py:      33 passed  (footprint structure, valid/invalid poses, actions,
+                                    transitions, swept cells, work zone alignment)
+
+=== W2 Unit Tests (80 tests) =======================================
+
+test_state_machine.py (32 tests):
+
+  TestMachineStateEnum (5):
+    - test_initial_state_is_7            PASSED
+    - test_inspection_state_is_8         PASSED
+    - test_installation_state_is_9       PASSED
+    - test_completed_state_is_10         PASSED
+    - test_state_order                   PASSED
+
+  TestMachineStateTransitions (6):
+    - test_cannot_skip_states            PASSED  (状态7不能直接执行INSTALL)
+    - test_disassemble_allowed_in_state_7 PASSED
+    - test_inspect_allowed_in_state_8    PASSED
+    - test_install_allowed_in_state_9    PASSED
+    - test_cannot_double_disassemble     PASSED
+    - test_cannot_inspect_completed      PASSED  (状态10不能执行任何操作)
+
+  TestMachineLocking (6):
+    - test_lock_acquires                 PASSED
+    - test_other_robot_cannot_lock       PASSED  (lock后其他机器人不能lock同一台)
+    - test_lock_idempotent_for_same_robot PASSED
+    - test_unlock_releases               PASSED  (unlock后可以重新lock)
+    - test_unlock_always_succeeds        PASSED
+    - test_lock_nonexistent_machine      PASSED
+
+  TestStateAdvancement (5):
+    - test_complete_disassemble_moves_to_8 PASSED
+    - test_complete_inspect_moves_to_9   PASSED
+    - test_complete_install_moves_to_10  PASSED
+    - test_complete_nonexistent_raises   PASSED
+    - test_full_chain_d_i_r              PASSED
+
+  TestAllCompleted (4):
+    - test_all_completed_false_initially PASSED
+    - test_all_completed_true_when_done  PASSED
+    - test_partial_complete              PASSED
+    - test_48_machines_all_completed     PASSED  (48台全部完成后all_completed=True)
+
+  TestGetMachinesReady (3):
+    - test_ready_for_disassemble_initially PASSED
+    - test_ready_when_locked             PASSED
+    - test_ready_after_state_change      PASSED
+
+  TestGetMachinesInState (2):
+    - test_all_in_state_7_initially      PASSED
+    - test_after_completion              PASSED
+
+  TestSummary (2):
+    - test_summary_has_all_states        PASSED
+    - test_summary_counts_initial        PASSED
+
+test_reservation_table.py (28 tests):
+
+  TestBasicReservation (5):
+    - test_reserve_success               PASSED  (预约成功返回True)
+    - test_reserve_conflict              PASSED  (冲突预约返回False)
+    - test_reserve_overlapping_cells_conflict PASSED
+    - test_reserve_different_time_no_conflict PASSED
+    - test_reserve_different_cell_no_conflict  PASSED
+
+  TestPoseFree (4):
+    - test_free_when_empty               PASSED
+    - test_not_free_when_reserved        PASSED
+    - test_free_for_own_robot            PASSED  (exclude_robot排除自己)
+    - test_not_free_for_other_robot      PASSED
+
+  TestSweepReservation (5):
+    - test_sweep_reserve_success         PASSED  (扫掠预约成功)
+    - test_sweep_is_free_empty           PASSED
+    - test_sweep_not_free_when_reserved  PASSED
+    - test_sweep_free_non_overlapping_interval PASSED
+    - test_sweep_free_for_own_robot      PASSED
+
+  TestServiceLock (5):
+    - test_service_reserve_success       PASSED
+    - test_service_is_free_empty         PASSED
+    - test_service_not_free_when_locked  PASSED
+    - test_service_free_non_overlapping  PASSED
+    - test_service_lock_blocks_other_robot PASSED (服务锁阻止其他机器人)
+
+  TestConflictDetection (4):
+    - test_no_conflicts_when_empty       PASSED
+    - test_conflict_detected             PASSED
+    - test_conflict_excludes_self        PASSED
+    - test_swept_conflicts_detected      PASSED
+
+  TestReleaseFuture (3):
+    - test_release_future_pose           PASSED  (释放后预约不再存在)
+    - test_release_future_only_own       PASSED  (只释放自己的)
+    - test_release_future_swept          PASSED
+
+  TestClearAndStats (4):
+    - test_pose_count_initial            PASSED
+    - test_pose_count_after_reservation  PASSED
+    - test_swept_count                   PASSED
+    - test_clear_removes_all             PASSED
+
+test_space_time_astar.py (20 tests):
+
+  TestSpaceTimeAStarBasic (6):
+    - test_find_path_no_reservations     PASSED  (无障碍时能找到路径)
+    - test_path_starts_at_correct_time   PASSED
+    - test_reaches_goal                  PASSED  (到达目标位置)
+    - test_time_is_monotonic             PASSED
+    - test_same_cell_returns_path        PASSED
+    - test_nonexistent_start_returns_none PASSED (无效起点返回None)
+
+  TestSpaceTimeAStarWithReservations (3):
+    - test_detour_around_reservation     PASSED  (有预约时绕行)
+    - test_path_respects_reservations    PASSED  (路径不经过被预约的格)
+    - test_fully_blocked_by_time_limit   PASSED
+
+  TestPlanWithService (2):
+    - test_plan_with_service_includes_waits PASSED (包含正确数量WAIT)
+    - test_plan_with_service_unreachable PASSED
+
+  TestReservePath (2):
+    - test_reserve_path_writes_to_table  PASSED
+    - test_reserve_path_with_machine     PASSED
+
+  TestCache (2):
+    - test_cache_hit_on_repeat           PASSED
+    - test_clear_cache                   PASSED
+
+  TestSpaceTimeAStarConsistency (2):
+    - test_static_vs_no_reservation_space_time PASSED
+    - test_multiple_sequential_paths     PASSED
+
+=== W2 Integration Tests (15 tests) ==================================
+
+test_scenario_1.py (15 tests):
+
+  TestScenario1W1Modules (3):
+    - test_map_generated                 PASSED
+    - test_pose_graph_built              PASSED
+    - test_static_astar_reaches_all_machines PASSED (288个服务点对全部可达)
+
+  TestFallbackAssignment (4):
+    - test_manual_assign_scenario_1      PASSED (A_1=96, B_1=48)
+    - test_manual_assign_operation_types PASSED (类型正确)
+    - test_manual_assign_precedence_order PASSED (D在R之前)
+    - test_manual_assign_assignments_list PASSED (144条分配记录)
+
+  TestScenario1Simulation (6):
+    - test_simulation_engine_import      PASSED
+    - test_setup_no_error                PASSED
+    - test_step_produces_state           PASSED
+    - test_run_to_completion             PASSED  (核心! 全48台完成)
+    - test_no_collisions_in_log          PASSED  (核心! 碰撞=0)
+    - test_all_operations_completed      PASSED  (144个操作全部执行)
+
+  TestManualPipelineWithoutEngine (1):
+    - test_full_static_pipeline          PASSED  (简化版pipeline也碰撞=0)
+
+  TestScenario1Statistics (1):
+    - test_scenario_1_summary            PASSED
+
+=== Scene 1 End-to-End Results =======================================
+
+  SimulationEngine.run() completed successfully:
+    - All 48 machines reached COMPLETED (state=10)
+    - All 144 operations executed
+    - Zero collisions detected
+    - Event log has no "collision" events
+    - A_1 completed 96 operations (48 D + 48 R)
+    - B_1 completed 48 operations (48 I)
+
+=== Agent1 W2 Module Quality Assessment ===============================
+
+  src/simulation/state_machine.py:
+    MachineStateMachine - 9 methods, clean API.
+    can_start_operation, lock_machine, unlock_machine, complete_operation,
+    get_machines_ready_for, get_machines_in_state, all_completed, completed_count, summary.
+    Status: PASS - all state transitions correct, locking mechanism works,
+            full D->I->R chain validated.
+
+  src/planning/reservation_table.py:
+    ReservationTable - 14 methods, 3 reservation types (pose/swept/service).
+    Interval-based [t_start, t_end), exclude_robot support, release_future.
+    Status: PASS - conflict detection correct, sweep/pose/service all work,
+            release_future properly scoped to robot_id.
+
+  src/planning/space_time_astar.py:
+    SpaceTimeAStar - 6 public methods. A* in (x,y,t) space with reservation
+    table integration. plan_with_service for move + service wait.
+    Status: PASS - finds paths, respects reservations, plan_with_service
+            produces correct WAIT sequences, cache works.
+
+  src/solver/fallback.py:
+    manual_assign_scenario_1 - scenario-specific fallback.
+    manual_assign_multi_robot - load-balanced multi-robot assignment.
+    manual_assign - automatic dispatcher.
+    Status: PASS - scenario 1 produces 96/48 split, multi-robot
+            round-robin assignment correct.
+
+  src/simulation/engine.py:
+    SimulationEngine - full discrete-event simulator.
+    setup(), step(), run(), get_state(), is_finished().
+    Status: PASS - runs scenario 1 to completion, all 144 ops done,
+            zero collisions, state machine integration correct.
+
+=== Failed Tests Detail =============================================
+
+  None. All 149 tests passed.
+
+=== Key Statistics ==================================================
+
+  Map:            25x29 (725 cells)
+  Machines:       48 (6 rows x 8)
+  Operations:     144 (48 D + 48 I + 48 R), chain D->I->R
+  Scene 1:        1A + 1B (A_1=96 ops, B_1=48 ops)
+  A work:         576 time units (48*6 + 48*6)
+  B work:         480 time units (48*10)
+  Collisions:     0
+  Test coverage:  149 tests across 7 test files
+
+  W1 modules tested:  domain/enums, domain/models, domain/validation,
+                      map/fixed_map, map/service_poses, map/pose_graph,
+                      planning/static_astar
+
+  W2 modules tested:  simulation/state_machine, planning/reservation_table,
+                      planning/space_time_astar, solver/fallback,
+                      simulation/engine
+
+=== Overall Assessment ===============================================
+
+  ALL 149 TESTS PASSED. The W2 codebase is fully functional:
+
+  1. MachineStateMachine correctly implements the 7->8->9->10 state
+     transition chain with proper locking and precedence enforcement.
+
+  2. ReservationTable provides robust space-time conflict detection
+     across pose occupancy, swept areas during movement, and service
+     locks during operations.
+
+  3. SpaceTimeAStar successfully plans collision-free paths in the
+     (x, y, t) space, detouring around reservations made by other
+     robots. plan_with_service correctly appends WAIT sequences for
+     operation execution.
+
+  4. Fallback solver produces correct manual assignments for scenario 1
+     and multi-robot scenarios with load balancing.
+
+  5. SimulationEngine runs scenario 1 to full completion (48 machines
+     all reaching COMPLETED) with zero collisions, demonstrating the
+     full pipeline is working end-to-end.
+
+  The codebase is ready for Week 3: multi-scenario testing (2A1B, 4A2B),
+  CP-SAT integration, and performance benchmarking.
+
+======================================================================

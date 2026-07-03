@@ -1,0 +1,8 @@
+numpy>=1.26
+PyYAML>=6.0
+matplotlib>=3.8
+imageio>=2.34
+imageio-ffmpeg>=0.5
+ortools>=9.10
+pytest>=8.0
+

@@ -1,0 +1,18 @@
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.coverage
+htmlcov/
+.venv/
+venv/
+
+# Editors and operating systems
+.DS_Store
+.idea/
+.vscode/
+
+# Generated simulation artifacts (keep the map preview)
+outputs/**
+!outputs/fixed_map.png
+

@@ -1,0 +1,174 @@
+======================================================================
+  Multi-Robot Scheduler v4.0 - Verification Report
+  Date: 2026-07-01
+  Agent: Agent2 (Test Inspector)
+======================================================================
+
+=== Test Results Summary ============================================
+
+test_fixed_map.py:   21 passed, 0 failed, 0 errors
+test_footprint.py:   33 passed, 0 failed, 0 errors
+verification script:  PASS (7/7 sections passed)
+
+--- Unit Test Details ---
+
+test_fixed_map.py (21 tests):
+  Class TestMapDimensions (3 tests):
+    - test_terrain_shape        PASSED
+    - test_width_constant       PASSED
+    - test_height_constant      PASSED
+
+  Class TestObstacleColumns (3 tests):
+    - test_obstacle_in_internal_rows       PASSED
+    - test_non_obstacle_in_internal_rows   PASSED
+    - test_obstacle_not_in_trunk           PASSED
+
+  Class TestTrunkRoad (2 tests):
+    - test_trunk_all_road      PASSED
+    - test_internal_not_trunk  PASSED
+
+  Class TestMachines (7 tests):
+    - test_machine_count              PASSED
+    - test_machine_cells_count        PASSED
+    - test_machine_cells_adjacent     PASSED
+    - test_machine_rows               PASSED
+    - test_machine_x_starts           PASSED
+    - test_machine_positions_exact    PASSED
+    - test_machine_initial_state      PASSED
+    - test_each_row_has_8_machines    PASSED
+
+  Class TestOperations (5 tests):
+    - test_operation_count              PASSED
+    - test_operation_types              PASSED
+    - test_operation_chain              PASSED
+    - test_service_anchor_is_left_cell  PASSED
+    - test_three_ops_per_machine        PASSED
+
+test_footprint.py (33 tests):
+  Class TestFootprintStructure (4 tests):
+    - test_cell_count   PASSED
+    - test_dimensions   PASSED
+    - test_work_zone    PASSED
+    - test_cells_at     PASSED
+
+  Class TestValidPose (9 tests):
+    - test_valid_pose_center             PASSED
+    - test_valid_pose_at_bounds          PASSED
+    - test_valid_pose_top_left_corner    PASSED
+    - test_invalid_pose_x_out_of_bounds  PASSED
+    - test_invalid_pose_y_out_of_bounds  PASSED
+    - test_invalid_pose_negative_x       PASSED
+    - test_invalid_pose_negative_y       PASSED
+    - test_invalid_pose_obstacle         PASSED
+    - test_valid_near_obstacle           PASSED
+
+  Class TestActionClassification (7 tests):
+    - test_up               PASSED
+    - test_down             PASSED
+    - test_left             PASSED
+    - test_right            PASSED
+    - test_wait             PASSED
+    - test_diagonal_invalid PASSED
+    - test_long_jump_invalid PASSED
+
+  Class TestTransition (8 tests):
+    - test_vertical_in_internal_allowed        PASSED
+    - test_horizontal_in_internal_rejected     PASSED
+    - test_horizontal_in_trunk_allowed         PASSED
+    - test_horizontal_across_boundary_rejected PASSED
+    - test_wait_always_allowed                 PASSED
+    - test_transition_to_obstacle_rejected     PASSED
+    - test_transition_out_of_bounds_rejected   PASSED
+    - test_vertical_in_trunk_allowed           PASSED
+
+  Class TestSweptCells (3 tests):
+    - test_swept_union            PASSED
+    - test_swept_wait_equals_start PASSED
+    - test_swept_count            PASSED
+
+  Class TestWorkZoneAlignment (2 tests):
+    - test_work_zone_covers_machine PASSED
+    - test_work_zone_above_body     PASSED
+
+--- Verification Script Results (7 sections) ---
+
+  SECTION 1: Map Generation        PASS
+    - Dimensions: 25 x 29, dtype int32
+    - Terrain shape (29, 25) confirmed
+
+  SECTION 2: Map Summary           PASS
+    - OBSTACLE      : 92 cells (12.7%)  [4 cols x 23 rows]
+    - INTERNAL_ROAD : 483 cells (66.6%)
+    - TRUNK_ROAD    : 150 cells (20.7%) [6 rows x 25 cols]
+    - All 725 cells accounted for
+
+  SECTION 3: Machines & Ops        PASS
+    - 48 machines (M_y{row}_x{x} format)
+    - 144 operations (3 per machine)
+    - DISASSEMBLE=48, INSPECT=48, INSTALL=48
+    - Robot types: DISASSEMBLE/INSTALL=A, INSPECT=B
+    - Durations: D=6, I=10, R=6
+    - Precedence: D -> I -> R per machine
+    - Service anchors = machine left cells
+
+  SECTION 4: Visualization         PASS
+    - Text terrain map rendered
+    - Machine positions (M) verified on correct rows
+    - Obstacle columns at x=4,10,16,22 confirmed
+
+  SECTION 5: Footprint Validation  PASS
+    - Footprint: 8 offsets (2x4)
+    - cells_at() and work_zone() correct
+    - Trunk road poses validated
+    - Horizontal move rejected in interior, allowed on trunk
+    - Vertical move and WAIT always valid when in-bounds
+    - Action classification: all 6 cases correct
+    - Full enumeration: 440 valid, 285 invalid (total=725)
+
+  SECTION 6: PoseGraph             PASS
+    - 440 valid poses, 1410 edges
+    - All 48 service anchors are in PoseGraph
+    - BFS connectivity confirmed: (1,25) -> (24,26) reachable
+
+  SECTION 7: Travel Times          PASS
+    - 48x48 travel time matrix via A*
+    - 2256 non-diagonal entries, 0 failures
+    - Computation time: 0.44s (0.19 ms per entry)
+    - Min: 4, Max: 63, Mean: 28.7, Median: 29
+
+=== Failed Tests Detail =============================================
+
+  None. All tests passed.
+
+=== Key Statistics ==================================================
+
+  Map:            25x29 (725 cells), 4 obstacle columns, 6 trunk rows
+  Machines:       48 (6 rows x 8 machines = 48)
+  Operations:     144 (D=48, I=48, R=48), chain D->I->R
+  Total duration: D=6, I=10, R=6 per machine
+  Valid poses:    440 out of 725 cells (60.7%)
+  Pose edges:     1410 (avg 3.2 neighbors per valid pose)
+  Travel matrix:  48x48, all pairs reachable
+  Min travel:     4 steps
+  Max travel:     63 steps
+  Mean travel:    28.7 steps
+
+=== Overall Assessment ==============================================
+
+  ALL TESTS PASSED. The v4.0 codebase is structurally sound:
+  - Fixed map generation produces the correct 25x29 terrain with
+    92 obstacle cells, 483 internal road cells, and 150 trunk road
+    cells.
+  - All 48 centrifuges and 144 operations are correctly generated
+    with proper precedence chains and robot type assignments.
+  - Footprint validation correctly handles boundaries, obstacles,
+    horizontal movement restrictions, and action classification.
+  - PoseGraph correctly enumerates 440 valid poses (max anchor x=24,
+    max anchor y=26 for the 2x4 footprint) with 1410 valid edges.
+  - All 48 service points are mutually reachable via A*, with a
+    complete travel time matrix computed in ~0.44 seconds.
+
+  The codebase is ready for the next phase: CP-SAT task assignment
+  and Space-Time A* path planning with conflict resolution.
+
+======================================================================

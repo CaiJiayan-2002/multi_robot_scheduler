@@ -1,0 +1,61 @@
+# 多机器人协同调度系统 - 固定地图配置 v4.0
+
+map:
+  width: 25
+  height: 29
+  coordinate_origin: top_left
+  x_min: 1
+  x_max: 25
+  y_min: 1
+  y_max: 29
+
+  internal_rows: [1, 23]
+  trunk_rows: [24, 29]
+  obstacle_columns_in_internal_rows: [4, 10, 16, 22]
+
+  terrain_codes:
+    obstacle: 0
+    internal_road: 1
+    trunk_road: 2
+
+machines:
+  rows: [3, 7, 11, 15, 19, 23]
+  x_starts: [2, 5, 8, 11, 14, 17, 20, 23]
+  initial_state: 7
+
+  state_codes:
+    pending_disassembly: 7
+    pending_inspection: 8
+    pending_installation: 9
+    completed: 10
+
+operations:
+  disassemble:
+    robot_type: A
+    alignment: 2
+    work: 4
+    total_duration: 6
+  inspect:
+    robot_type: B
+    alignment: 2
+    work: 8
+    total_duration: 10
+  install:
+    robot_type: A
+    alignment: 2
+    work: 4
+    total_duration: 6
+
+robot_footprint:
+  width: 2
+  height: 4
+  allow_rotation: false
+  work_zone_rows: [0, 0]  # top 2 cells relative to anchor
+  work_zone_cols: [0, 1]
+
+movement_rules:
+  allow_horizontal_only_in_trunk: true
+  trunk_y_threshold: 24
+  disable_diagonal: true
+  actions: ["UP", "DOWN", "LEFT", "RIGHT", "WAIT"]
+  time_per_action: 1
