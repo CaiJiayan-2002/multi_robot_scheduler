@@ -2,15 +2,15 @@
 
 map:
   width: 25
-  height: 29
+  height: 31
   coordinate_origin: top_left
   x_min: 1
   x_max: 25
   y_min: 1
-  y_max: 29
+  y_max: 31
 
   internal_rows: [1, 23]
-  trunk_rows: [24, 29]
+  trunk_rows: [24, 31]
   obstacle_columns_in_internal_rows: [4, 10, 16, 22]
 
   terrain_codes:

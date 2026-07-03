@@ -44,16 +44,16 @@ def operations(fixed_map: FixedMap) -> dict:
 
 class TestMapDimensions:
     def test_terrain_shape(self, terrain: np.ndarray):
-        """地形矩阵应为 29 行 x 25 列。"""
-        assert terrain.shape == (29, 25), f"Expected (29, 25), got {terrain.shape}"
+        """地形矩阵应为 31 行 x 25 列。"""
+        assert terrain.shape == (31, 25), f"Expected (31, 25), got {terrain.shape}"
 
     def test_width_constant(self):
         """WIDTH 常量 = 25。"""
         assert FixedMap.WIDTH == 25
 
     def test_height_constant(self):
-        """HEIGHT 常量 = 29。"""
-        assert FixedMap.HEIGHT == 29
+        """HEIGHT 常量 = 31。"""
+        assert FixedMap.HEIGHT == 31
 
 
 # ——— 障碍列 —————————————————————————————————————————————————————————
@@ -89,7 +89,7 @@ class TestObstacleColumns:
         trunk_start_0 = 23
         for col_1 in self.OBSTACLE_COLS:
             col_0 = col_1 - 1
-            for row_0 in range(trunk_start_0, 29):
+            for row_0 in range(trunk_start_0, 31):
                 assert terrain[row_0, col_0] != TerrainCode.OBSTACLE.value, (
                     f"Unexpected OBSTACLE in trunk at row={row_0}, col={col_0}"
                 )
@@ -102,7 +102,7 @@ class TestTrunkRoad:
     def test_trunk_all_road(self, terrain: np.ndarray):
         """主干道 (y>=24) 所有格为 TRUNK_ROAD(2)。"""
         trunk_start_0 = 23  # y=24 -> 0-indexed row 23
-        for row_0 in range(trunk_start_0, 29):
+        for row_0 in range(trunk_start_0, 31):
             for col_0 in range(25):
                 assert terrain[row_0, col_0] == TerrainCode.TRUNK_ROAD.value, (
                     f"Expected TRUNK_ROAD at row={row_0}, col={col_0}"

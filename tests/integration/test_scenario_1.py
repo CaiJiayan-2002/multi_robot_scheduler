@@ -63,11 +63,11 @@ def robot_specs():
     return {
         "A_1": RobotSpec(
             robot_id="A_1", robot_type=RobotType.A,
-            start_anchor=Cell(1, 24),  # 主干道左端
+            start_anchor=Cell(1, 28),  # 第28行左侧停车位
         ),
         "B_1": RobotSpec(
             robot_id="B_1", robot_type=RobotType.B,
-            start_anchor=Cell(24, 24),  # 主干道右端
+            start_anchor=Cell(24, 28),  # 第28行右侧停车位
         ),
     }
 
@@ -79,7 +79,7 @@ class TestScenario1W1Modules:
     """验证 W1 模块在场景中正常工作。"""
 
     def test_map_generated(self, terrain, machines, operations):
-        assert terrain.shape == (29, 25)
+        assert terrain.shape == (31, 25)
         assert len(machines) == 48
         assert len(operations) == 144
 
@@ -167,6 +167,22 @@ class TestFallbackAssignment:
         result = manual_assign_scenario_1(machines, operations, robot_specs)
         assert len(result.assignments) == 144, \
             f"Expected 144 assignments, got {len(result.assignments)}"
+
+    def test_pipeline_starts_at_second_column_and_runs_top_down(
+        self, machines, operations, robot_specs
+    ):
+        """A/B 使用从 x=5 开始、列内自上而下的同一流水线。"""
+        result = manual_assign_scenario_1(machines, operations, robot_specs)
+        expected = [
+            f"M_y{y}_x{x}"
+            for x in (5, 8, 11, 14, 17, 20, 23, 2)
+            for y in (3, 7, 11, 15, 19, 23)
+        ]
+        a_ops = result.robot_schedules["A_1"].operations
+        b_ops = result.robot_schedules["B_1"].operations
+        assert [operations[o].machine_id for o, _, _ in a_ops[:48]] == expected
+        assert [operations[o].machine_id for o, _, _ in a_ops[48:]] == expected
+        assert [operations[o].machine_id for o, _, _ in b_ops] == expected
 
 
 # ── 3. 仿真引擎验证（核心 pipeline）──────────────────────────────────────

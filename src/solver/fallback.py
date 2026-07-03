@@ -19,6 +19,22 @@ def _machine_sort_key(machines: dict[str, Machine], mid: str) -> tuple[int, int]
     return (m.row, m.cells[0].x)
 
 
+SCENARIO_1_COLUMN_ORDER = (5, 8, 11, 14, 17, 20, 23, 2)
+
+
+def _scenario_1_pipeline_key(
+    machines: dict[str, Machine], mid: str
+) -> tuple[int, int]:
+    """从 x=5 开始按列排序，列内按 y 自上而下。"""
+    machine = machines[mid]
+    x = machine.cells[0].x
+    try:
+        column_index = SCENARIO_1_COLUMN_ORDER.index(x)
+    except ValueError:
+        column_index = len(SCENARIO_1_COLUMN_ORDER) + x
+    return (column_index, machine.row)
+
+
 def manual_assign_scenario_1(
     machines: dict[str, Machine],
     operations: dict[str, Operation],
@@ -58,9 +74,9 @@ def manual_assign_scenario_1(
             fallback_used=True,
         )
 
-    # 按机器位置自然排序（先 row 后 x，而非字符串排序）
+    # 流水线顺序：第二列 x=5 起步，每列自上而下，第一列 x=2 最后。
     from functools import partial
-    sort_key = partial(_machine_sort_key, machines)
+    sort_key = partial(_scenario_1_pipeline_key, machines)
     machine_ids = sorted(machines.keys(), key=sort_key)
 
     # 收集各类型的操作

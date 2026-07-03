@@ -1,6 +1,6 @@
 """固定地图生成器 v4.0
 
-生成符合 v4.0 设计文档的固定 25x29 地图。
+生成带第28行机器人停车锚点的固定 25x31 地图。
 """
 
 from __future__ import annotations
@@ -12,7 +12,7 @@ from ..domain.models import Cell, Machine, Operation
 
 
 class FixedMap:
-    """生成 v4.0 定义的固定 25x29 地图。
+    """生成固定 25x31 地图。
 
     三层结构：
     - terrain: 2D numpy array (0=obstacle, 1=internal_road, 2=trunk_road)
@@ -22,9 +22,9 @@ class FixedMap:
 
     # — 地图几何常量 ——————————————————————————————
     WIDTH: int = 25
-    HEIGHT: int = 29
+    HEIGHT: int = 31
     INTERNAL_ROWS = (1, 23)  # 不变
-    TRUNK_ROWS = (24, 29)
+    TRUNK_ROWS = (24, 31)
     OBSTACLE_COLUMNS = (4, 10, 16, 22)  # 不变
     TRUNK_Y_THRESHOLD: int = 24  # 不变
 
@@ -61,7 +61,7 @@ class FixedMap:
         """生成固定地图。
 
         Returns:
-            terrain: shape=(29, 25)，0-indexed，值域 0/1/2
+            terrain: shape=(31, 25)，0-indexed，值域 0/1/2
             machines: key=machine_id，48台离心机
             operations: key=operation_id，144个操作
         """
@@ -84,7 +84,7 @@ class FixedMap:
 
     # ——— 地形生成 —————————————————————————————————————————————————————
     def _generate_terrain(self) -> np.ndarray:
-        """生成 29x25 地形矩阵。
+        """生成 31x25 地形矩阵。
 
         规则：
         - 主干道 (y >= 24): 全部为 TRUNK_ROAD (2)
