@@ -12,6 +12,25 @@
 - 完整场景实现 144/144 操作完成、零碰撞、零约束违规
 - 新增流水线顺序和 31 行地图回归测试
 
+## 完整 CP-SAT 正式模式
+
+正式入口现使用 `solver_mode="assignment_schedule"`，由 OR-Tools CP-SAT
+联合决定操作分配、机器人完整顺序、开始/结束时间和静态 A* 旅行衔接。
+默认 `allow_fallback=false`，求解失败会明确终止，不再静默使用手工队列。
+手工 row-major/column-major 仅保留为显式基线。
+
+正式验证（建议使用项目虚拟环境）：
+
+```bash
+python -m venv .venv
+source .venv/bin/activate
+python -m pip install -r requirements.txt
+python scripts/run_cp_sat_validation.py
+python scripts/compare_strategies.py
+```
+
+模型、调用链和限制见 [CP-SAT 完整任务规划](docs/cp_sat_assignment_schedule.md)。
+
 ## 核心功能
 
 - 2 × 4 footprint 姿态、转移及扫掠区域碰撞验证
@@ -31,6 +50,79 @@ python -m venv .venv
 source .venv/bin/activate
 python -m pip install -r requirements.txt
 ```
+
+## 1A1B 场景代码使用说明
+
+1A1B 场景表示 1 台 A 类机器人和 1 台 B 类机器人协同完成 48 台离心机的
+拆卸、检测和安装，共 144 个操作。A 类机器人负责 `DISASSEMBLE` 和
+`INSTALL`，B 类机器人负责 `INSPECT`。
+
+### 运行 1A1B 完整场景
+
+建议使用项目虚拟环境运行：
+
+```bash
+source .venv/bin/activate
+python scripts/run_scenario_1_full.py cp_sat_current_video
+```
+
+运行后结果会写入：
+
+```text
+outputs/scenario_1/cp_sat_current_video/
+```
+
+主要输出文件包括：
+
+- `metrics.json`：完整指标，包括 makespan、路径长度、等待时间、碰撞数、
+  约束违规数、求解器状态和 fallback 状态；
+- `event_log.jsonl`：逐时间步事件日志；
+- `gantt.png`：机器人作业甘特图；
+- `trajectories.png`：机器人轨迹图；
+- `trajectories.json`：动画和轨迹分析使用的原始轨迹数据。
+
+### 生成 1A1B 动画
+
+如果需要生成 MP4 动画，可在场景运行完成后执行：
+
+```bash
+python scripts/create_animation_fast.py cp_sat_current_video scenario_1 10 24
+```
+
+生成的视频为：
+
+```text
+outputs/scenario_1/cp_sat_current_video/animation_smooth.mp4
+```
+
+其中 `10` 表示 10 FPS，`24` 表示每个地图格子的渲染像素尺寸。
+
+### 任务规划是否由求解器完成
+
+1A1B 正式运行不会使用手工任务队列。任务规划由 OR-Tools CP-SAT 求解器在
+`solver_mode="assignment_schedule"` 下完成，内容包括：
+
+- 每个操作分配给哪台机器人；
+- 每台机器人的完整操作顺序；
+- 每个操作的计划开始时间和结束时间；
+- 相邻操作之间的静态 A* 旅行时间；
+- 拆卸 → 检测 → 安装的前置关系；
+- makespan、旅行时间、换列次数和负载均衡等优化目标。
+
+可以在 `metrics.json` 中确认正式结果来源：
+
+```json
+{
+  "solver_backend": "ortools_cp_sat",
+  "solver_mode": "assignment_schedule",
+  "operation_sequence_source": "cp_sat",
+  "fallback_used": false
+}
+```
+
+如果 `operation_sequence_source` 是 `cp_sat` 且 `fallback_used` 是 `false`，
+说明任务顺序来自 CP-SAT 求解器，而不是 row-major、column-major 或其他
+手工排序代码。
 
 ## 快速开始
 

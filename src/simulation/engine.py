@@ -31,7 +31,9 @@ from ..map.service_poses import ServicePoseCalculator
 from ..planning.reservation_table import ReservationTable
 from ..planning.space_time_astar import SpaceTimeAStar
 from ..planning.static_astar import StaticAStar
-from ..solver.fallback import manual_assign
+from ..planning.conflicts import PlanningConflict
+from ..solver.scheduler import solve_assignment_schedule
+from ..solver.config import SolverConfig
 from .state_machine import MachineStateMachine
 
 import numpy as np
@@ -69,6 +71,7 @@ class RobotRuntime:
     finished: bool = False
     retry_after: int = 0
     yield_requested: bool = False
+    planned_start_by_op: dict[str, int] = field(default_factory=dict)
 
 
 # ======================================================================
@@ -131,6 +134,7 @@ class SimulationEngine:
 
         # 事件日志
         self.event_log: list[dict] = []
+        self.planning_conflicts: list[PlanningConflict] = []
 
         # 仿真状态
         self._running: bool = False
@@ -169,6 +173,7 @@ class SimulationEngine:
         self.robot_specs = robots
         self.current_time = 0
         self.event_log.clear()
+        self.planning_conflicts.clear()
         self.reservation_table = ReservationTable()
 
         # 构建姿态图
@@ -212,6 +217,10 @@ class SimulationEngine:
             if rid in schedule.robot_schedules:
                 rs = schedule.robot_schedules[rid]
                 runtime.assigned_ops = [op_id for op_id, _, _ in rs.operations]
+                runtime.planned_start_by_op = {
+                    op_id: planned_start
+                    for op_id, planned_start, _ in rs.operations
+                }
 
             self.robots[rid] = runtime
 
@@ -225,7 +234,7 @@ class SimulationEngine:
     def setup_scenario_1(self) -> None:
         """快速搭建场景1（1A1B）的完整仿真环境。
 
-        使用 FixedMap 生成地图，manual_assign 生成任务分配。
+        使用 FixedMap 与完整 CP-SAT 生成任务分配、顺序和计划时间。
         """
         # 生成地图
         fixed_map = FixedMap()
@@ -246,8 +255,9 @@ class SimulationEngine:
         }
 
         # 生成任务分配
-        schedule = manual_assign(
-            self._make_problem(machines, operations, robots)
+        schedule = solve_assignment_schedule(
+            terrain, machines, operations, robots,
+            SolverConfig(allow_fallback=False),
         )
 
         self.setup(terrain, machines, operations, robots, schedule)
@@ -370,8 +380,21 @@ class SimulationEngine:
         # *** 注入静止机器人位置到预约表 ***
         self._inject_static_robots()
 
+        # 正常情况下允许多机器人同时规划/移动。时空预约表和执行前
+        # safety guard 负责避免本体碰撞；如果仍保留“单移动令牌”，
+        # 2A1B 会被间接串行化，难以形成 A1/A2/B1 同时作业的流水线。
+        multi_robot_motion_busy = False
+        pending_yield = any(
+            runtime.yield_requested and not runtime.finished
+            for runtime in self.robots.values()
+        )
+
         for rid, robot in self.robots.items():
             if robot.status != RobotStatus.IDLE or robot.finished:
+                continue
+            if len(self.robots) > 2 and pending_yield and not robot.yield_requested:
+                continue
+            if multi_robot_motion_busy:
                 continue
 
             # B 在与执行任务的 A 发生路径冲突后，先驶回右侧停车位，
@@ -383,6 +406,11 @@ class SimulationEngine:
             if not robot.assigned_ops:
                 # *** 所有任务完成：规划返回起点 ***
                 self._plan_return_to_start(rid, robot)
+                if (
+                    len(self.robots) > 2
+                    and robot.status == RobotStatus.MOVING
+                ):
+                    pass
                 continue
 
             # 获取下一个操作
@@ -438,11 +466,41 @@ class SimulationEngine:
                 path = self._plan_two_legs(robot.current_anchor, trunk_wp, goal_anchor, self.current_time, rid)
 
             if path is None:
+                blockers = [
+                    other.current_op_id
+                    for other_id, other in self.robots.items()
+                    if other_id != rid and other.current_op_id
+                ]
+                conflict_ops = tuple([next_op_id] + blockers)
+                suggested = (
+                    (blockers[0], next_op_id, 1) if blockers else None
+                )
+                self.planning_conflicts.append(PlanningConflict(
+                    robot_id=rid,
+                    conflicting_operation_ids=conflict_ops,
+                    conflicting_time_interval=(
+                        self.current_time,
+                        self.current_time + self._planning_window,
+                    ),
+                    minimum_required_delay=1,
+                    suggested_precedence_constraint=suggested,
+                ))
                 self._log_event("planning_failed",
                     f"{rid}: cannot plan path to {operation.machine_id}")
                 self.state_machine.unlock_machine(operation.machine_id)
                 robot.status = RobotStatus.WAITING_CONFLICT
                 continue
+
+            # CP-SAT 的 start 是服务开始下界。若静态计划留有时间余量，
+            # 在目标位等待，路径规划器不得提前改变任务顺序或开工作业。
+            planned_start = robot.planned_start_by_op.get(next_op_id, -1)
+            if path and planned_start > path[-1].t:
+                goal = path[-1]
+                for wait_t in range(path[-1].t + 1, planned_start + 1):
+                    path.append(TimedPose(
+                        t=wait_t, x=goal.x, y=goal.y,
+                        action="WAIT", operation_id=None,
+                    ))
 
             # 预约路径
             if not self.space_time_astar.reserve_path(
@@ -792,9 +850,34 @@ class SimulationEngine:
                 f"blocked_by={blocker}",
             )
 
+        # 多机器人按需让行：如果一个移动机器人被静止机器人本体挡住，
+        # 且挡路者当前没有作业/移动，则让挡路者主动驶回停车位。这样
+        # 避免“每项操作后都回停车位”的过度保守，也避免在窄通道中
+        # 无限重规划撞上同一个静止 footprint。
+        if len(self.robots) > 2:
+            for blocker in sorted(set(cancelled.values())):
+                blocking_robot = self.robots.get(blocker)
+                if blocking_robot is None or blocking_robot.finished:
+                    continue
+                if blocking_robot.status in (RobotStatus.WORKING, RobotStatus.MOVING):
+                    continue
+                if blocking_robot.current_anchor == blocking_robot.spec.start_anchor:
+                    continue
+                blocking_robot.yield_requested = True
+                blocking_robot.status = RobotStatus.IDLE
+                self.reservation_table.release_future(blocker, self.current_time)
+                safe[blocker] = {"action_type": "wait", "reason": "yield_clearance"}
+                self._log_event(
+                    "yield_requested",
+                    f"{blocker}: clearing blocked passage for other robot",
+                )
+
         # A 执行任务优先。发生 A/B 冲突时，B 在退避结束后主动驶向
         # 自己的安全停车位，而不是留在冲突点反复等待。
-        if cancelled and "A_1" in self.robots and "B_1" in self.robots:
+        if (
+            cancelled and len(self.robots) == 2
+            and "A_1" in self.robots and "B_1" in self.robots
+        ):
             b = self.robots["B_1"]
             if not b.finished and b.status != RobotStatus.WORKING:
                 b.yield_requested = True
@@ -856,6 +939,9 @@ class SimulationEngine:
                 robot.current_op_id = None
                 robot.current_path = None
                 robot.status = RobotStatus.IDLE
+                # 不在每项操作后强制回停车区。静止/作业中的机器人会被
+                # 注入预约表，后续路径规划可以等待或绕行；强制停车会
+                # 造成 2A1B/4A2B 大量无意义移动，并破坏 CP-SAT 流水线并行性。
 
     # ==================================================================
     # 状态查询

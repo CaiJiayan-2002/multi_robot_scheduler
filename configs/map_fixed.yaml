@@ -59,3 +59,17 @@ movement_rules:
   disable_diagonal: true
   actions: ["UP", "DOWN", "LEFT", "RIGHT", "WAIT"]
   time_per_action: 1
+
+solver:
+  solver_mode: assignment_schedule
+  allow_fallback: false
+  max_time_seconds: 60
+  makespan_tolerance: 0
+  require_same_a_robot_for_disassemble_and_install: false
+  preferred_first_column: 2
+  preferred_first_column_hard: false
+  prefer_top_down_within_column: true
+  enforce_top_down_within_column: false
+  enforce_bottom_up_disassembly_within_column: true
+  enforce_same_a_robot_for_column_disassembly: true
+  penalize_column_switch: true

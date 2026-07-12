@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import json
+import subprocess
+import os
 import sys
 import time
 from pathlib import Path
@@ -12,15 +14,15 @@ sys.path.insert(0, str(PROJECT))
 from src.domain.enums import RobotType
 from src.domain.models import Cell, Footprint, RobotSpec
 from src.evaluation.metrics import MetricsCalculator
-from src.evaluation.plots import GanttChart, TrajectoryPlot
 from src.map.fixed_map import FixedMap
 from src.simulation.engine import SimulationEngine
-from src.solver.fallback import manual_assign_scenario_2
+from src.solver.config import SolverConfig
+from src.solver.scheduler import solve_assignment_schedule
 
 
 def main() -> None:
     experiment = sys.argv[1] if len(sys.argv) > 1 else "260703_test11"
-    output = PROJECT / "outputs" / "scenario_1" / experiment
+    output = PROJECT / "outputs" / "scenario_2" / experiment
     output.mkdir(parents=True, exist_ok=True)
 
     started = time.perf_counter()
@@ -31,7 +33,10 @@ def main() -> None:
         "A_2": RobotSpec("A_2", RobotType.A, Cell(12, 28), footprint),
         "B_1": RobotSpec("B_1", RobotType.B, Cell(24, 28), footprint),
     }
-    schedule = manual_assign_scenario_2(machines, operations, robots)
+    schedule = solve_assignment_schedule(
+        terrain, machines, operations, robots,
+        SolverConfig(max_time_seconds=60, allow_fallback=False),
+    )
 
     engine = SimulationEngine()
     engine.setup(terrain, machines, operations, robots, schedule)
@@ -45,20 +50,6 @@ def main() -> None:
         engine.current_time, timing,
     )
     machine_summary = engine.state_machine.summary()
-
-    gantt = GanttChart.build_gantt_data(engine.event_log)
-    GanttChart.save_gantt_png(
-        gantt, str(output / "gantt.png"),
-        title=f"Scenario 2 (2A1B) — Makespan={engine.current_time}",
-    )
-    trajectories = TrajectoryPlot.build_trajectory_data(engine.event_log)
-    TrajectoryPlot.save_trajectory_json(
-        trajectories, str(output / "trajectories.json")
-    )
-    TrajectoryPlot.save_trajectory_png(
-        trajectories, terrain, machines, str(output / "trajectories.png"),
-        title=f"Scenario 2 (2A1B) — {engine.current_time} steps",
-    )
 
     data = {
         "scenario": "2A1B",
@@ -79,8 +70,10 @@ def main() -> None:
         },
         "planning_quality": {
             "replans": metrics.number_of_replans,
-            "method": schedule.objective.get("method"),
-            "column_groups": schedule.objective.get("column_groups"),
+            "solver_backend": schedule.solver_backend,
+            "solver_mode": schedule.solver_mode,
+            "solver_status": schedule.solver_status,
+            "sequence_source": schedule.operation_sequence_source,
         },
         "machine_completion": machine_summary,
         "timing": timing,
@@ -91,6 +84,16 @@ def main() -> None:
     with (output / "event_log.jsonl").open("w") as file:
         for event in engine.event_log:
             file.write(json.dumps(event, ensure_ascii=False) + "\n")
+    render_python = os.environ.get("MRS_RENDER_PYTHON", "/opt/anaconda3/bin/python")
+    if not Path(render_python).exists():
+        render_python = sys.executable
+    subprocess.run([
+        render_python,
+        str(PROJECT / "scripts" / "render_scenario_outputs.py"),
+        experiment,
+        "Scenario 2 (2A1B CP-SAT)",
+        "scenario_2",
+    ], check=True)
 
     completed_ops = sum(len(robot.completed_ops) for robot in engine.robots.values())
     print(json.dumps({

@@ -9,6 +9,8 @@
 from __future__ import annotations
 
 import json
+import subprocess
+import os
 import sys
 import time
 from pathlib import Path
@@ -22,9 +24,9 @@ from src.map.pose_graph import PoseGraph
 from src.map.service_poses import ServicePoseCalculator
 from src.planning.static_astar import StaticAStar
 from src.simulation.engine import SimulationEngine
-from src.solver.fallback import manual_assign_scenario_1
+from src.solver.config import SolverConfig
+from src.solver.scheduler import solve_assignment_schedule
 from src.evaluation.metrics import MetricsCalculator
-from src.evaluation.plots import GanttChart, TrajectoryPlot
 
 
 def main():
@@ -73,18 +75,17 @@ def main():
           f"{pose_graph.edge_count()} edges")
 
     # ==================================================================
-    # 3. 任务分配 (Fallback)
+    # 3. 完整 CP-SAT 任务分配与调度
     # ==================================================================
     t_solver = time.perf_counter()
-    schedule = manual_assign_scenario_1(
-        {mid: m for mid, m in machines.items()},
-        operations,
-        robot_specs,
+    schedule = solve_assignment_schedule(
+        terrain, machines, operations, robot_specs,
+        SolverConfig(max_time_seconds=10, allow_fallback=False),
     )
     timing["solver"] = time.perf_counter() - t_solver
     a_ops = len(schedule.robot_schedules["A_1"].operations)
     b_ops = len(schedule.robot_schedules["B_1"].operations)
-    print(f"[3] Assignment: A_1={a_ops} ops, B_1={b_ops} ops  "
+    print(f"[3] CP-SAT schedule: A_1={a_ops} ops, B_1={b_ops} ops  "
           f"({timing['solver']:.3f}s)")
 
     # ==================================================================
@@ -195,25 +196,6 @@ def main():
     print(f"  VISUALIZATIONS")
     print(f"{'=' * 70}")
 
-    gantt_data = GanttChart.build_gantt_data(event_log)
-    GanttChart.save_gantt_png(
-        gantt_data,
-        str(output_dir / "gantt.png"),
-        title=f"Scenario 1 (1A1B) Gantt Chart — Makespan={makespan}",
-    )
-
-    # 轨迹
-    trajectories = TrajectoryPlot.build_trajectory_data(event_log)
-    TrajectoryPlot.save_trajectory_json(
-        trajectories, str(output_dir / "trajectories.json")
-    )
-    TrajectoryPlot.save_trajectory_png(
-        trajectories, terrain,
-        {mid: m for mid, m in machines.items()},
-        str(output_dir / "trajectories.png"),
-        title=f"Scenario 1 (1A1B) — {makespan} steps, {len(event_log)} events",
-    )
-
     # 完整指标 JSON
     metrics_json = {
         "scenario": "1A1B",
@@ -249,6 +231,13 @@ def main():
             "replans": scenario_metrics.number_of_replans,
             "solver_status": schedule.status,
             "fallback_used": schedule.fallback_used,
+            "solver_backend": schedule.solver_backend,
+            "solver_mode": schedule.solver_mode,
+            "solver_status": schedule.solver_status,
+            "operation_sequence_source": schedule.operation_sequence_source,
+            "estimated_total_travel_time": schedule.estimated_total_travel_time,
+            "column_switch_count": schedule.column_switch_count,
+            "load_gap": schedule.load_gap,
         },
         "machine_completion": machine_summary,
     }
@@ -264,6 +253,15 @@ def main():
         for e in event_log:
             f.write(json.dumps(e, ensure_ascii=False) + "\n")
     print(f"[DATA] Event log saved: {log_path}  ({len(event_log)} events)")
+    render_python = os.environ.get("MRS_RENDER_PYTHON", "/opt/anaconda3/bin/python")
+    if not Path(render_python).exists():
+        render_python = sys.executable
+    subprocess.run([
+        render_python,
+        str(Path(__file__).resolve().parent / "render_scenario_outputs.py"),
+        experiment_name,
+        "Scenario 1 (1A1B CP-SAT)",
+    ], check=True)
 
     print(f"\n{'=' * 70}")
     print(f"  ALL OUTPUTS: {output_dir}/")

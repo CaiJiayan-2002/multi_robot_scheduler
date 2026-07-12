@@ -90,6 +90,11 @@ class RobotSchedule:
     robot_id: str
     operations: list[tuple[str, int, int]] = field(default_factory=list)
     # (operation_id, planned_start, planned_end)
+    ordered_operations: list[dict] = field(default_factory=list)
+    total_service_time: int = 0
+    estimated_travel_time: int = 0
+    first_operation: str | None = None
+    last_operation: str | None = None
 
 
 @dataclass
@@ -102,6 +107,16 @@ class ScheduleResult:
     assignments: list[dict] = field(default_factory=list)
     robot_schedules: dict[str, RobotSchedule] = field(default_factory=dict)
     fallback_used: bool = False
+    solver_backend: str = ""
+    solver_mode: str = ""
+    solver_status: str = ""
+    solver_objective: dict = field(default_factory=dict)
+    makespan: int = 0
+    estimated_total_travel_time: int = 0
+    column_switch_count: int = 0
+    load_gap: int = 0
+    fallback_reason: str | None = None
+    operation_sequence_source: str = ""
 
 
 @dataclass

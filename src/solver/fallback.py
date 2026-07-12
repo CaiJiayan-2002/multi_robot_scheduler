@@ -115,6 +115,10 @@ def manual_assign_scenario_1(
             "method": "manual_fallback",
         },
         fallback_used=True,
+        solver_backend="manual_baseline",
+        solver_mode="baseline",
+        solver_status="FEASIBLE",
+        operation_sequence_source="baseline",
     )
     result.robot_schedules[robot_a] = a_schedule
 
@@ -199,6 +203,10 @@ def manual_assign_multi_robot(
         status=ResultStatus.FEASIBLE.value,
         objective={"method": "manual_fallback"},
         fallback_used=True,
+        solver_backend="manual_baseline",
+        solver_mode="baseline",
+        solver_status="FEASIBLE",
+        operation_sequence_source="baseline",
     )
 
     # 轮询分配给 A 机器人
@@ -299,6 +307,10 @@ def manual_assign_scenario_2(
             "column_groups": [list(group) for group in column_groups],
         },
         fallback_used=True,
+        solver_backend="manual_baseline",
+        solver_mode="baseline",
+        solver_status="FEASIBLE",
+        operation_sequence_source="baseline",
     )
 
     for rid, machine_ids in zip(a_robots, machine_groups):

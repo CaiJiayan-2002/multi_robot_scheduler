@@ -1,301 +1,559 @@
-"""CP-SAT 任务分配求解器 v4.0
-
-使用 Google OR-Tools CP-SAT 求解器进行任务分配。
-
-Mode A (assignment_only): 只分配操作给机器人，估计负载。
-不决定精确顺序和开始时间（W2阶段）。
-
-输入:
-- 144个操作
-- 机器人列表
-- 旅行时间矩阵
-
-输出:
-- ScheduleResult: 每个机器人分配了哪些操作
-"""
-
+"""OR-Tools CP-SAT 完整任务分配与调度模型。"""
 from __future__ import annotations
 
-from ..domain.enums import OperationType, RobotType, ResultStatus
-from ..domain.models import (
-    Machine, Operation, RobotSpec, RobotSchedule, ScheduleResult, SchedulingProblem,
-)
+from dataclasses import dataclass
+import time
+from typing import Any
 
-# 尝试导入 ortools
+from ..domain.enums import OperationType, RobotType, ResultStatus
+from ..domain.models import ScheduleResult, SchedulingProblem
+from .config import SolverConfig
+
 try:
     from ortools.sat.python import cp_model
     _ORTOOLS_AVAILABLE = True
-except ImportError:
+except ImportError:  # pragma: no cover - 正式入口会明确报错
+    cp_model = None
     _ORTOOLS_AVAILABLE = False
 
 
+@dataclass
+class ModelArtifacts:
+    operations: list[str]
+    eligible_by_robot: dict[str, list[str]]
+    assigned: dict[tuple[str, str], Any]
+    start: dict[str, Any]
+    end: dict[str, Any]
+    intervals: dict[tuple[str, str], Any]
+    arcs: dict[tuple[str, str, str], Any]
+    makespan: Any
+    total_travel: Any
+    column_switches: Any
+    load_gap: Any
+    preference_penalty: Any
+
+
 class CpSatScheduler:
-    """CP-SAT 任务分配求解器。
+    """同时决定分配、顺序、时间和静态旅行衔接的正式求解器。"""
 
-    使用约束规划将144个操作分配给多台机器人。
-
-    Mode A (assignment_only):
-    - 约束: 每操作一台机器人，机器人类型匹配，前序依赖
-    - 目标: 最小化最大负载差
-
-    Attributes:
-        _model: CP-SAT 模型
-        _solver: CP-SAT 求解器
-    """
-
-    def __init__(self, config_path: str | None = None) -> None:
-        """初始化 CP-SAT 求解器。
-
-        Args:
-            config_path: 配置文件路径（保留参数，当前未使用）
-        """
+    def __init__(self, config: SolverConfig | None = None) -> None:
         if not _ORTOOLS_AVAILABLE:
             raise ImportError(
-                "ortools 未安装。请运行: pip install ortools\n"
-                "或使用 src.solver.fallback.manual_assign() 作为备选方案。"
+                "OR-Tools 未安装；正式模式禁止 fallback。请安装 requirements.txt。"
             )
-        self._config_path = config_path
+        self.config = config or SolverConfig()
         self._model: cp_model.CpModel | None = None
         self._solver: cp_model.CpSolver | None = None
+        self._artifacts: ModelArtifacts | None = None
 
-    # ------------------------------------------------------------------
     def solve(
         self,
         problem: SchedulingProblem,
-        max_time_seconds: int = 30,
-        mode: str = "assignment_only",
+        max_time_seconds: int | None = None,
+        mode: str = "assignment_schedule",
     ) -> ScheduleResult:
-        """求解任务分配问题。
-
-        Args:
-            problem: 调度问题定义
-            max_time_seconds: 求解时间上限（秒）
-            mode: 求解模式，"assignment_only" 仅分配操作
-
-        Returns:
-            ScheduleResult 包含各机器人的操作分配
-        """
-        self._model = cp_model.CpModel()
-        self._solver = cp_model.CpSolver()
-        self._solver.parameters.max_time_in_seconds = max_time_seconds
-        self._solver.parameters.num_search_workers = 8
-
-        if mode == "assignment_only":
-            return self._build_assignment_only_model(problem)
-        else:
+        solve_started = time.perf_counter()
+        if mode != "assignment_schedule":
             return ScheduleResult(
                 status=ResultStatus.INVALID_INPUT.value,
-                objective={"error": f"未知求解模式: {mode}"},
+                solver_backend="ortools_cp_sat",
+                solver_mode=mode,
+                solver_status="INVALID_MODE",
+                fallback_used=False,
+                operation_sequence_source="none",
+                fallback_reason=f"unsupported formal mode: {mode}",
             )
+        if not problem.travel_times:
+            raise ValueError("assignment_schedule requires footprint-aware travel_times")
 
-    # ------------------------------------------------------------------
-    def _build_assignment_only_model(
-        self, problem: SchedulingProblem
-    ) -> ScheduleResult:
-        """构建 assignment_only 模式的 CP-SAT 模型。
+        self._model, self._artifacts = self._build_model(problem)
+        total_budget = float(max_time_seconds or self.config.max_time_seconds)
+        def new_solver(seconds: float):
+            solver = cp_model.CpSolver()
+            solver.parameters.max_time_in_seconds = max(1.0, seconds)
+            solver.parameters.num_search_workers = 8
+            solver.parameters.random_seed = self.config.random_seed
+            return solver
 
-        约束:
-        1. 每个操作只分配给一台机器人
-        2. DISASSEMBLE/INSTALL 只能分配给 A 机器人
-        3. INSPECT 只能分配给 B 机器人
-        4. D->I->R 前序关系（同一台离心机的操作必须按顺序执行，B须等A的D完成）
-
-        目标:
-        - 最小化 A 机器人之间的最大负载差
-
-        Args:
-            problem: 调度问题
-
-        Returns:
-            ScheduleResult
-        """
-        model = self._model
-        operations = problem.operations
-        robots = problem.robots
-
-        # 按类型分类机器人
-        a_robots = [rid for rid, r in robots.items() if r.robot_type == RobotType.A]
-        b_robots = [rid for rid, r in robots.items() if r.robot_type == RobotType.B]
-
-        # 按类型分类操作
-        d_ops = [
-            op_id for op_id, op in operations.items()
-            if op.operation_type == OperationType.DISASSEMBLE
-        ]
-        i_ops = [
-            op_id for op_id, op in operations.items()
-            if op.operation_type == OperationType.INSPECT
-        ]
-        r_ops = [
-            op_id for op_id, op in operations.items()
-            if op.operation_type == OperationType.INSTALL
-        ]
-
-        # ——————————————————————————————————————————————————————————
-        # 决策变量: x[op_id, robot_id] = 1 如果 robot 执行 op
-        # ——————————————————————————————————————————————————————————
-        x_vars: dict[tuple[str, str], cp_model.IntVar] = {}
-        for op_id, op in operations.items():
-            eligible = []
-            if op.operation_type in (OperationType.DISASSEMBLE, OperationType.INSTALL):
-                eligible = a_robots
-            elif op.operation_type == OperationType.INSPECT:
-                eligible = b_robots
-
-            for rid in eligible:
-                x_vars[(op_id, rid)] = model.NewBoolVar(f"x_{op_id}_{rid}")
-
-        # ——————————————————————————————————————————————————————————
-        # 约束1: 每个操作恰好分配给一台机器人
-        # ——————————————————————————————————————————————————————————
-        for op_id, op in operations.items():
-            eligible = []
-            if op.operation_type in (OperationType.DISASSEMBLE, OperationType.INSTALL):
-                eligible = a_robots
-            elif op.operation_type == OperationType.INSPECT:
-                eligible = b_robots
-
-            if eligible:
-                model.Add(sum(x_vars[(op_id, rid)] for rid in eligible) == 1)
-            else:
-                # 没有合适的机器人 -> 不可行
-                return ScheduleResult(
-                    status=ResultStatus.INFEASIBLE.value,
-                    objective={"error": f"操作 {op_id} 没有可用的机器人"},
-                )
-
-        # ——————————————————————————————————————————————————————————
-        # 约束2: 前序关系（同一台离心机的 D->I, I->R）
-        #   如果 D 分配给 A_i，则 I 必须在某 B_j 上执行
-        #   如果 I 分配给 B_j，则 R 必须在某 A_i 上执行
-        #   这由操作存在性保证，但需要确保 D完成后 I 才能开始
-        #   在 assignment_only 模式下，我们只确保分配本身的一致性
-        # ——————————————————————————————————————————————————————————
-        # 同台机器的 D 和 I 至少分配给不同机器人
-        # 实际上在 assignment_only 模式下，D/R 只能给A，I 只能给B
-        # 前序关系由类型分配自然保证
-
-        # ——————————————————————————————————————————————————————————
-        # 约束3: A 机器人之间负载均衡目标
-        # ——————————————————————————————————————————————————————————
-        if len(a_robots) > 1:
-            a_loads: dict[str, cp_model.LinearExpr] = {}
-            for rid in a_robots:
-                a_loads[rid] = sum(
-                    x_vars[(op_id, rid)]
-                    for op_id in list(d_ops) + list(r_ops)
-                    if (op_id, rid) in x_vars
-                )
-
-            # 负载上界和下界
-            max_load_a = model.NewIntVar(0, len(d_ops) + len(r_ops), "max_load_a")
-            min_load_a = model.NewIntVar(0, len(d_ops) + len(r_ops), "min_load_a")
-
-            for rid in a_robots:
-                model.Add(a_loads[rid] <= max_load_a)
-                model.Add(a_loads[rid] >= min_load_a)
-
-            # 目标: 最小化最大负载差
-            load_diff_a = model.NewIntVar(
-                0, len(d_ops) + len(r_ops), "load_diff_a"
-            )
-            model.Add(max_load_a - min_load_a == load_diff_a)
-            model.Minimize(load_diff_a)
-
-        if len(b_robots) > 1:
-            b_loads: dict[str, cp_model.LinearExpr] = {}
-            for rid in b_robots:
-                b_loads[rid] = sum(
-                    x_vars[(op_id, rid)]
-                    for op_id in i_ops
-                    if (op_id, rid) in x_vars
-                )
-
-            max_load_b = model.NewIntVar(0, len(i_ops), "max_load_b")
-            min_load_b = model.NewIntVar(0, len(i_ops), "min_load_b")
-
-            for rid in b_robots:
-                model.Add(b_loads[rid] <= max_load_b)
-                model.Add(b_loads[rid] >= min_load_b)
-
-            load_diff_b = model.NewIntVar(0, len(i_ops), "load_diff_b")
-            model.Add(max_load_b - min_load_b == load_diff_b)
-
-            # 如果 A 也有负载均衡目标，则组合目标
-            if len(a_robots) > 1:
-                total_diff = model.NewIntVar(
-                    0, len(d_ops) + len(r_ops) + len(i_ops), "total_diff"
-                )
-                model.Add(total_diff == load_diff_a + load_diff_b)
-                model.Minimize(total_diff)
-            else:
-                model.Minimize(load_diff_b)
-
-        # ——————————————————————————————————————————————————————————
-        # 求解
-        # ——————————————————————————————————————————————————————————
-        status = self._solver.Solve(model)
-
-        if status == cp_model.OPTIMAL or status == cp_model.FEASIBLE:
-            return self._extract_solution(
-                problem, x_vars, a_robots, b_robots, status
-            )
-        elif status == cp_model.INFEASIBLE:
-            return ScheduleResult(
-                status=ResultStatus.INFEASIBLE.value,
-                objective={"error": "CP-SAT 判定问题不可行"},
-            )
-        else:
-            return ScheduleResult(
-                status=ResultStatus.TIMEOUT.value,
-                objective={"error": f"求解超时，状态={status}"},
-            )
-
-    # ------------------------------------------------------------------
-    def _extract_solution(
-        self,
-        problem: SchedulingProblem,
-        x_vars: dict,
-        a_robots: list[str],
-        b_robots: list[str],
-        status: int,
-    ) -> ScheduleResult:
-        """从 CP-SAT 解中提取分配结果。"""
-        result = ScheduleResult(
-            status=ResultStatus.FEASIBLE.value
-            if status == cp_model.FEASIBLE
-            else ResultStatus.SUCCESS.value,
+        # Phase 1: makespan
+        self._model.Minimize(self._artifacts.makespan)
+        self._solver = new_solver(total_budget * 0.5)
+        status = self._solver.Solve(self._model)
+        if status not in (cp_model.OPTIMAL, cp_model.FEASIBLE):
+            return self._failure_result(status)
+        best_makespan = self._solver.Value(self._artifacts.makespan)
+        self._model.Add(
+            self._artifacts.makespan
+            <= best_makespan + self.config.makespan_tolerance
         )
 
-        # 记录求解统计
-        result.solve_time_seconds = self._solver.WallTime()
-        result.best_objective_bound = self._solver.BestObjectiveBound()
-        result.objective = {
-            "objective_value": self._solver.ObjectiveValue(),
-            "solve_time": result.solve_time_seconds,
-        }
+        # Phase 2: total static-A* travel
+        self._model.Minimize(self._artifacts.total_travel)
+        phase2_solver = new_solver(total_budget * 0.3)
+        status2 = phase2_solver.Solve(self._model)
+        if status2 in (cp_model.OPTIMAL, cp_model.FEASIBLE):
+            status = status2
+            self._solver = phase2_solver
+            best_travel = self._solver.Value(self._artifacts.total_travel)
+            self._model.Add(self._artifacts.total_travel <= best_travel)
 
-        # 提取分配
-        for (op_id, rid), var in x_vars.items():
-            if self._solver.Value(var) > 0.5:
-                op = problem.operations[op_id]
-                result.assignments.append({
-                    "operation_id": op_id,
-                    "robot_id": rid,
-                    "machine_id": op.machine_id,
-                    "operation_type": op.operation_type.value,
-                })
+        # Phase 3: column switches, load gap, preferences and early starts.
+        secondary = (
+            self._artifacts.column_switches * 100_000
+            + self._artifacts.load_gap * 1_000
+            + self._artifacts.preference_penalty * 100
+            + sum(self._artifacts.start.values())
+        )
+        self._model.Minimize(secondary)
+        phase3_solver = new_solver(total_budget * 0.2)
+        status3 = phase3_solver.Solve(self._model)
+        if status3 in (cp_model.OPTIMAL, cp_model.FEASIBLE):
+            status = status3
+            self._solver = phase3_solver
 
-                if rid not in result.robot_schedules:
-                    result.robot_schedules[rid] = RobotSchedule(robot_id=rid)
-                result.robot_schedules[rid].operations.append((op_id, -1, -1))
-
-        # 统计各机器人负载
-        for rid in a_robots + b_robots:
-            if rid in result.robot_schedules:
-                count = len(result.robot_schedules[rid].operations)
-            else:
-                count = 0
-            result.objective[f"load_{rid}"] = count
-
+        from .schedule_extractor import extract_cp_sat_schedule
+        result = extract_cp_sat_schedule(
+            problem, self.config, self._solver, status, self._artifacts
+        )
+        result.solve_time_seconds = time.perf_counter() - solve_started
         return result
+
+    def _build_model(
+        self, problem: SchedulingProblem
+    ) -> tuple[cp_model.CpModel, ModelArtifacts]:
+        model = cp_model.CpModel()
+        # sorted 只用于稳定变量编号；求解结果顺序完全由 arc 决策产生。
+        operation_ids = sorted(problem.operations)
+        robot_ids = sorted(problem.robots)
+        horizon = sum(op.duration for op in problem.operations.values())
+        horizon += max(problem.travel_times.values(), default=0) * len(operation_ids)
+
+        start = {
+            op_id: model.NewIntVar(0, horizon, f"start[{op_id}]")
+            for op_id in operation_ids
+        }
+        end = {
+            op_id: model.NewIntVar(0, horizon, f"end[{op_id}]")
+            for op_id in operation_ids
+        }
+        assigned: dict[tuple[str, str], Any] = {}
+        intervals: dict[tuple[str, str], Any] = {}
+        eligible_by_robot = {rid: [] for rid in robot_ids}
+
+        for op_id in operation_ids:
+            op = problem.operations[op_id]
+            model.Add(end[op_id] == start[op_id] + op.duration)
+            eligible = [
+                rid for rid in robot_ids
+                if problem.robots[rid].robot_type == op.eligible_robot_type
+            ]
+            if not eligible:
+                raise ValueError(f"operation {op_id} has no eligible robot")
+            for rid in eligible:
+                presence = model.NewBoolVar(f"assigned[{op_id},{rid}]")
+                assigned[(op_id, rid)] = presence
+                eligible_by_robot[rid].append(op_id)
+                intervals[(op_id, rid)] = model.NewOptionalIntervalVar(
+                    start[op_id], op.duration, end[op_id], presence,
+                    f"optional_interval[{op_id},{rid}]",
+                )
+            model.AddExactlyOne(assigned[(op_id, rid)] for rid in eligible)
+
+        if self.config.require_same_a_robot_for_disassemble_and_install:
+            for mid in problem.machines:
+                d_id, r_id = f"{mid}_D", f"{mid}_R"
+                for rid, robot in problem.robots.items():
+                    if robot.robot_type == RobotType.A:
+                        model.Add(assigned[(d_id, rid)] == assigned[(r_id, rid)])
+
+        if self.config.enforce_same_a_robot_for_column_disassembly:
+            columns: dict[int, list[str]] = {}
+            for mid, machine in problem.machines.items():
+                columns.setdefault(machine.cells[0].x, []).append(mid)
+            a_robot_ids = [
+                rid for rid, robot in problem.robots.items()
+                if robot.robot_type == RobotType.A
+            ]
+            for machine_ids in columns.values():
+                if len(machine_ids) < 2:
+                    continue
+                anchor_op = f"{machine_ids[0]}_D"
+                for mid in machine_ids[1:]:
+                    op_id = f"{mid}_D"
+                    for rid in a_robot_ids:
+                        # 列是自然的拆机工作包；具体哪台 A 负责该列仍由
+                        # CP-SAT 决定，但不能把同一列拆机切碎给多台 A，
+                        # 否则会出现一台机器人沿列移动时跳过中间机器。
+                        model.Add(assigned[(op_id, rid)] == assigned[(anchor_op, rid)])
+
+        if self.config.enforce_top_down_within_column:
+            columns: dict[int, list[str]] = {}
+            for mid, machine in problem.machines.items():
+                columns.setdefault(machine.cells[0].x, []).append(mid)
+            for machine_ids in columns.values():
+                by_row = sorted(machine_ids, key=lambda mid: problem.machines[mid].row)
+                for upper, lower in zip(by_row, by_row[1:]):
+                    upper_op, lower_op = f"{upper}_D", f"{lower}_D"
+                    for rid, robot in problem.robots.items():
+                        if robot.robot_type == RobotType.A:
+                            model.Add(end[upper_op] <= start[lower_op]).OnlyEnforceIf([
+                                assigned[(upper_op, rid)], assigned[(lower_op, rid)]
+                            ])
+
+        if self.config.enforce_bottom_up_disassembly_within_column:
+            columns: dict[int, list[str]] = {}
+            for mid, machine in problem.machines.items():
+                columns.setdefault(machine.cells[0].x, []).append(mid)
+            for machine_ids in columns.values():
+                # 主干道在地图下方；拆机机器人从下方进入列时，正式
+                # 模式要求同一台 A 在同一列内按 y=23,19,...,3 连续拆机，
+                # 防止出现 y=23→19→15→7→3→11 这种跳过中间离心机再
+                # 回来补做的规划。
+                by_row_from_bottom = sorted(
+                    machine_ids,
+                    key=lambda mid: problem.machines[mid].row,
+                    reverse=True,
+                )
+                for lower, upper in zip(by_row_from_bottom, by_row_from_bottom[1:]):
+                    lower_op, upper_op = f"{lower}_D", f"{upper}_D"
+                    for rid, robot in problem.robots.items():
+                        if robot.robot_type == RobotType.A:
+                            model.Add(end[lower_op] <= start[upper_op]).OnlyEnforceIf([
+                                assigned[(lower_op, rid)], assigned[(upper_op, rid)]
+                            ])
+
+        for mid in problem.machines:
+            d_id, i_id, r_id = f"{mid}_D", f"{mid}_I", f"{mid}_R"
+            model.Add(end[d_id] <= start[i_id])
+            model.Add(end[i_id] <= start[r_id])
+        for before, after, delay in self.config.additional_precedence_constraints:
+            if before not in end or after not in start:
+                raise ValueError(f"unknown repair precedence: {before} -> {after}")
+            model.Add(start[after] >= end[before] + delay)
+
+        for rid in robot_ids:
+            model.AddNoOverlap(
+                intervals[(op_id, rid)] for op_id in eligible_by_robot[rid]
+            )
+
+        arcs: dict[tuple[str, str, str], Any] = {}
+        travel_terms = []
+        switch_terms = []
+        preference_terms = []
+        unique_columns = sorted({m.cells[0].x for m in problem.machines.values()})
+        preferred_x = None
+        if self.config.preferred_first_column is not None:
+            idx = self.config.preferred_first_column - 1
+            if 0 <= idx < len(unique_columns):
+                preferred_x = unique_columns[idx]
+
+        for rid in robot_ids:
+            ops = eligible_by_robot[rid]
+            node = {op_id: index + 1 for index, op_id in enumerate(ops)}
+            circuit_arcs: list[tuple[int, int, Any]] = []
+            empty = model.NewBoolVar(f"arc[{rid},START,END]")
+            arcs[(rid, "START", "END")] = empty
+            circuit_arcs.append((0, 0, empty))
+            assign_sum = sum(assigned[(op_id, rid)] for op_id in ops)
+            model.Add(assign_sum == 0).OnlyEnforceIf(empty)
+            model.Add(assign_sum >= 1).OnlyEnforceIf(empty.Not())
+
+            for op_id in ops:
+                self_loop = assigned[(op_id, rid)].Not()
+                circuit_arcs.append((node[op_id], node[op_id], self_loop))
+
+                first = model.NewBoolVar(f"arc[{rid},START,{op_id}]")
+                last = model.NewBoolVar(f"arc[{rid},{op_id},END]")
+                arcs[(rid, "START", op_id)] = first
+                arcs[(rid, op_id, "END")] = last
+                circuit_arcs.extend(((0, node[op_id], first), (node[op_id], 0, last)))
+                model.AddImplication(first, assigned[(op_id, rid)])
+                model.AddImplication(last, assigned[(op_id, rid)])
+                initial_t = problem.travel_times[(rid, "START", op_id)]
+                model.Add(start[op_id] >= initial_t).OnlyEnforceIf(first)
+                travel_terms.extend((first * initial_t, last * problem.travel_times[(rid, op_id, "END")]))
+
+                op = problem.operations[op_id]
+                first_is_preferred = (
+                    problem.robots[rid].robot_type == RobotType.A
+                    and op.operation_type == OperationType.DISASSEMBLE
+                    and preferred_x is not None
+                    and problem.machines[op.machine_id].cells[0].x == preferred_x
+                )
+                if self.config.preferred_first_column_hard and preferred_x is not None:
+                    if problem.robots[rid].robot_type == RobotType.A and not first_is_preferred:
+                        model.Add(first == 0)
+                elif (
+                    preferred_x is not None
+                    and problem.robots[rid].robot_type == RobotType.A
+                    and not first_is_preferred
+                ):
+                    preference_terms.append(first)
+
+            for from_id in ops:
+                from_machine = problem.machines[problem.operations[from_id].machine_id]
+                for to_id in ops:
+                    if from_id == to_id:
+                        continue
+                    arc = model.NewBoolVar(f"arc[{rid},{from_id},{to_id}]")
+                    arcs[(rid, from_id, to_id)] = arc
+                    circuit_arcs.append((node[from_id], node[to_id], arc))
+                    model.AddImplication(arc, assigned[(from_id, rid)])
+                    model.AddImplication(arc, assigned[(to_id, rid)])
+                    travel = problem.travel_times[(rid, from_id, to_id)]
+                    model.Add(start[to_id] >= end[from_id] + travel).OnlyEnforceIf(arc)
+                    travel_terms.append(arc * travel)
+                    to_machine = problem.machines[problem.operations[to_id].machine_id]
+                    if (
+                        self.config.penalize_column_switch
+                        and from_machine.cells[0].x != to_machine.cells[0].x
+                    ):
+                        switch_terms.append(arc)
+                    if self.config.prefer_top_down_within_column:
+                        from_op, to_op = problem.operations[from_id], problem.operations[to_id]
+                        wrong_way = (
+                            from_op.operation_type == OperationType.DISASSEMBLE
+                            and to_op.operation_type == OperationType.DISASSEMBLE
+                            and from_machine.cells[0].x == to_machine.cells[0].x
+                            and from_machine.row > to_machine.row
+                        )
+                        if wrong_way:
+                            if self.config.enforce_top_down_within_column:
+                                model.Add(arc == 0)
+                            else:
+                                preference_terms.append(arc)
+            model.AddCircuit(circuit_arcs)
+
+        total_travel = model.NewIntVar(0, horizon * max(1, len(robot_ids)), "total_travel")
+        model.Add(total_travel == sum(travel_terms))
+        column_switches = model.NewIntVar(0, len(operation_ids), "column_switch_count")
+        model.Add(column_switches == (sum(switch_terms) if switch_terms else 0))
+        preference_penalty = model.NewIntVar(0, len(operation_ids) * 2, "preference_penalty")
+        model.Add(preference_penalty == (sum(preference_terms) if preference_terms else 0))
+
+        load_gaps = []
+        for robot_type in (RobotType.A, RobotType.B):
+            typed = [rid for rid in robot_ids if problem.robots[rid].robot_type == robot_type]
+            if len(typed) < 2:
+                continue
+            loads = []
+            for rid in typed:
+                load = model.NewIntVar(0, horizon, f"service_load[{rid}]")
+                model.Add(load == sum(
+                    problem.operations[op_id].duration * assigned[(op_id, rid)]
+                    for op_id in eligible_by_robot[rid]
+                ))
+                loads.append(load)
+            maximum = model.NewIntVar(0, horizon, f"max_load[{robot_type.value}]")
+            minimum = model.NewIntVar(0, horizon, f"min_load[{robot_type.value}]")
+            gap = model.NewIntVar(0, horizon, f"load_gap[{robot_type.value}]")
+            model.AddMaxEquality(maximum, loads)
+            model.AddMinEquality(minimum, loads)
+            model.Add(gap == maximum - minimum)
+            load_gaps.append(gap)
+        load_gap = model.NewIntVar(0, horizon, "load_gap")
+        model.Add(load_gap == (sum(load_gaps) if load_gaps else 0))
+
+        install_ends = [
+            end[op_id] for op_id in operation_ids
+            if problem.operations[op_id].operation_type == OperationType.INSTALL
+        ]
+        makespan = model.NewIntVar(0, horizon, "makespan")
+        model.AddMaxEquality(makespan, install_ends)
+        artifacts = ModelArtifacts(
+            operation_ids, eligible_by_robot, assigned, start, end, intervals,
+            arcs, makespan, total_travel, column_switches, load_gap,
+            preference_penalty,
+        )
+        if not self._add_single_pair_warm_start(model, problem, artifacts):
+            self._add_multi_robot_warm_start(model, problem, artifacts)
+        return model, artifacts
+
+    @staticmethod
+    def _add_single_pair_warm_start(model, problem, artifacts) -> bool:
+        """为 1A1B 提供基于 A* 距离的可行初值，不固定任何决策。"""
+        a_ids = [rid for rid, r in problem.robots.items() if r.robot_type == RobotType.A]
+        b_ids = [rid for rid, r in problem.robots.items() if r.robot_type == RobotType.B]
+        if len(a_ids) != 1 or len(b_ids) != 1:
+            return False
+        a_id, b_id = a_ids[0], b_ids[0]
+        remaining = set(problem.machines)
+        machine_order = []
+        previous = "START"
+        while remaining:
+            chosen = min(
+                remaining,
+                key=lambda mid: (
+                    problem.travel_times[(
+                        a_id, previous,
+                        f"{mid}_D",
+                    )],
+                    mid,
+                ),
+            )
+            machine_order.append(chosen)
+            remaining.remove(chosen)
+            previous = f"{chosen}_D"
+
+        routes = {
+            a_id: [f"{mid}_D" for mid in machine_order] + [f"{mid}_R" for mid in machine_order],
+            b_id: [f"{mid}_I" for mid in machine_order],
+        }
+        for (op_id, rid), var in artifacts.assigned.items():
+            model.AddHint(var, int(op_id in routes[rid]))
+        for key, var in artifacts.arcs.items():
+            rid, source, target = key
+            route = routes[rid]
+            selected = False
+            if route:
+                selected = (
+                    (source == "START" and target == route[0])
+                    or (source == route[-1] and target == "END")
+                    or any(source == route[i] and target == route[i + 1] for i in range(len(route) - 1))
+                )
+            else:
+                selected = source == "START" and target == "END"
+            model.AddHint(var, int(selected))
+
+        times = {}
+        clock = 0
+        previous = "START"
+        for op_id in routes[a_id][:len(machine_order)]:
+            clock += problem.travel_times[(a_id, previous, op_id)]
+            times[op_id] = (clock, clock + problem.operations[op_id].duration)
+            clock = times[op_id][1]
+            previous = op_id
+        b_clock, previous = 0, "START"
+        for mid in machine_order:
+            op_id = f"{mid}_I"
+            b_clock += problem.travel_times[(b_id, previous, op_id)]
+            b_clock = max(b_clock, times[f"{mid}_D"][1])
+            times[op_id] = (b_clock, b_clock + problem.operations[op_id].duration)
+            b_clock = times[op_id][1]
+            previous = op_id
+        previous = routes[a_id][len(machine_order) - 1]
+        for mid in machine_order:
+            op_id = f"{mid}_R"
+            clock += problem.travel_times[(a_id, previous, op_id)]
+            clock = max(clock, times[f"{mid}_I"][1])
+            times[op_id] = (clock, clock + problem.operations[op_id].duration)
+            clock = times[op_id][1]
+            previous = op_id
+        for op_id, (start, end) in times.items():
+            model.AddHint(artifacts.start[op_id], start)
+            model.AddHint(artifacts.end[op_id], end)
+        return True
+
+    @staticmethod
+    def _add_multi_robot_warm_start(model, problem, artifacts) -> None:
+        """多机器人自动距离/负载贪心仅作为 CP-SAT 初值。"""
+        typed = {
+            RobotType.A: sorted(rid for rid, r in problem.robots.items() if r.robot_type == RobotType.A),
+            RobotType.B: sorted(rid for rid, r in problem.robots.items() if r.robot_type == RobotType.B),
+        }
+        assignment: dict[str, str] = {}
+        loads = {rid: 0 for rid in problem.robots}
+        # 以静态 A* 起点距离和当前服务负载选择 hint 分配，不固定模型。
+        for mid in problem.machines:
+            for suffix, robot_type in (("D", RobotType.A), ("I", RobotType.B), ("R", RobotType.A)):
+                op_id = f"{mid}_{suffix}"
+                if suffix == "R" and mid + "_D" in assignment:
+                    candidates = typed[robot_type]
+                else:
+                    candidates = typed[robot_type]
+                rid = min(
+                    candidates,
+                    key=lambda candidate: (
+                        loads[candidate] * 10
+                        + problem.travel_times[(candidate, "START", op_id)],
+                        candidate,
+                    ),
+                )
+                assignment[op_id] = rid
+                loads[rid] += problem.operations[op_id].duration
+
+        def nearest_route(rid: str, operation_ids: list[str]) -> list[str]:
+            route, remaining, previous = [], set(operation_ids), "START"
+            while remaining:
+                chosen = min(
+                    remaining,
+                    key=lambda op_id: (
+                        problem.travel_times[(rid, previous, op_id)], op_id
+                    ),
+                )
+                route.append(chosen)
+                remaining.remove(chosen)
+                previous = chosen
+            return route
+
+        routes = {}
+        for rid, robot in problem.robots.items():
+            own = [op for op, owner in assignment.items() if owner == rid]
+            if robot.robot_type == RobotType.A:
+                d_ops = [op for op in own if op.endswith("_D")]
+                r_ops = [op for op in own if op.endswith("_R")]
+                routes[rid] = nearest_route(rid, d_ops) + nearest_route(rid, r_ops)
+            else:
+                routes[rid] = nearest_route(rid, own)
+
+        for (op_id, rid), var in artifacts.assigned.items():
+            model.AddHint(var, int(assignment[op_id] == rid))
+        for (rid, source, target), var in artifacts.arcs.items():
+            route = routes[rid]
+            selected = (
+                (not route and source == "START" and target == "END")
+                or (route and source == "START" and target == route[0])
+                or (route and source == route[-1] and target == "END")
+                or any(source == route[i] and target == route[i + 1] for i in range(len(route) - 1))
+            )
+            model.AddHint(var, int(selected))
+
+        # 建立 hint 路由边 + 工艺边的 DAG，计算一致的最早时间。
+        predecessors = {op_id: [] for op_id in problem.operations}
+        initial = {op_id: 0 for op_id in problem.operations}
+        for rid, route in routes.items():
+            previous = "START"
+            for op_id in route:
+                if previous == "START":
+                    initial[op_id] = problem.travel_times[(rid, "START", op_id)]
+                else:
+                    predecessors[op_id].append((
+                        previous, problem.travel_times[(rid, previous, op_id)]
+                    ))
+                previous = op_id
+        for mid in problem.machines:
+            predecessors[f"{mid}_I"].append((f"{mid}_D", 0))
+            predecessors[f"{mid}_R"].append((f"{mid}_I", 0))
+
+        unresolved = set(problem.operations)
+        times = {}
+        while unresolved:
+            ready = [
+                op_id for op_id in unresolved
+                if all(pred in times for pred, _ in predecessors[op_id])
+            ]
+            if not ready:
+                return  # hint 含环时宁可不给时间提示，也不影响正式模型。
+            for op_id in ready:
+                earliest = initial[op_id]
+                for pred, travel in predecessors[op_id]:
+                    earliest = max(earliest, times[pred][1] + travel)
+                times[op_id] = (
+                    earliest, earliest + problem.operations[op_id].duration
+                )
+                unresolved.remove(op_id)
+        for op_id, (start, end) in times.items():
+            model.AddHint(artifacts.start[op_id], start)
+            model.AddHint(artifacts.end[op_id], end)
+
+    def _failure_result(self, status: int) -> ScheduleResult:
+        name = self._solver.StatusName(status) if self._solver else str(status)
+        return ScheduleResult(
+            status=ResultStatus.INFEASIBLE.value,
+            solver_backend="ortools_cp_sat",
+            solver_mode="assignment_schedule",
+            solver_status=name,
+            fallback_used=False,
+            fallback_reason=f"CP-SAT returned {name}; fallback disabled",
+            operation_sequence_source="none",
+        )

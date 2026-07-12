@@ -1,0 +1,23 @@
+"""求解器正式模式配置。"""
+from __future__ import annotations
+
+from dataclasses import dataclass
+
+
+@dataclass(frozen=True)
+class SolverConfig:
+    solver_mode: str = "assignment_schedule"
+    allow_fallback: bool = False
+    max_time_seconds: int = 60
+    makespan_tolerance: int = 0
+    require_same_a_robot_for_disassemble_and_install: bool = False
+    preferred_first_column: int | None = 2
+    preferred_first_column_hard: bool = False
+    prefer_top_down_within_column: bool = True
+    enforce_top_down_within_column: bool = False
+    enforce_bottom_up_disassembly_within_column: bool = True
+    enforce_same_a_robot_for_column_disassembly: bool = True
+    penalize_column_switch: bool = True
+    random_seed: int = 1
+    # (before_operation_id, after_operation_id, required_delay)
+    additional_precedence_constraints: tuple[tuple[str, str, int], ...] = ()

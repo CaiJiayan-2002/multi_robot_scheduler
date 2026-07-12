@@ -19,7 +19,8 @@ except ImportError:
 
 PROJECT = Path(__file__).resolve().parent.parent
 EXP = sys.argv[1] if len(sys.argv) > 1 else "260702_test4"
-DATA = PROJECT / "outputs" / "scenario_1" / EXP
+SCENARIO_DIR = sys.argv[3] if len(sys.argv) > 3 else "scenario_1"
+DATA = PROJECT / "outputs" / SCENARIO_DIR / EXP
 
 # ===== Load data =====
 from src.map.fixed_map import FixedMap
@@ -94,19 +95,40 @@ for t in sorted(work_times.keys()):
         else:
             current_work[rid] = (t, info["machine"])
 
-# ===== Sampling: cover the complete simulation with a bounded frame count =====
-# argv[2] controls the approximate maximum frames. State changes are always
-# inserted as keyframes, so a long livelock interval is visible without trying
-# to render tens of thousands of identical frames.
+# ===== Sampling =====
+# argv[4] may be "bounded" to enforce an approximate total frame budget. The
+# default mode keeps every movement frame and only compresses stationary waits.
 max_frames = int(sys.argv[2]) if len(sys.argv) > 2 else 600
-step = max(1, math.ceil(len(display_t) / max_frames))
-sampled_t = [display_t[i] for i in range(0, len(display_t), step)]
+sampling_mode = sys.argv[4] if len(sys.argv) > 4 else "movement_continuous"
+
+movement_t: set[int] = set()
+previous_positions: dict[str, tuple[int, int]] = {}
+for t in display_t:
+    moved = False
+    for rid, pos in time_index.get(t, {}).items():
+        if rid in previous_positions and previous_positions[rid] != pos:
+            moved = True
+        previous_positions[rid] = pos
+    if moved:
+        movement_t.add(t)
 
 # Insert keyframes at state change moments (redundant with step=1 but safe)
 state_change_times = sorted(machine_states.keys())
 keyframe_t = [t for t in state_change_times if t >= 1]
 keyframe_t.append(simulation_end_t)
-all_frames = sorted(set(sampled_t + keyframe_t))
+
+if sampling_mode == "bounded":
+    step = max(1, math.ceil(len(display_t) / max_frames))
+    all_frames = sorted(set(display_t[::step]).union(keyframe_t))
+    sampling_detail = f"bounded_step={step}"
+else:
+    mandatory_t = set(movement_t).union(keyframe_t)
+    idle_t = [t for t in display_t if t not in mandatory_t]
+    remaining_budget = max(1, max_frames - len(mandatory_t))
+    idle_step = max(1, math.ceil(len(idle_t) / remaining_budget))
+    sampled_idle_t = idle_t[::idle_step]
+    all_frames = sorted(mandatory_t.union(sampled_idle_t))
+    sampling_detail = f"movement_frames={len(movement_t)}, idle_step={idle_step}"
 deduped = []
 for t in all_frames:
     if not deduped or t - deduped[-1] >= 1:
@@ -117,7 +139,10 @@ n_frames = len(sampled_t)
 # 固定 10 FPS；帧采样由 step 单独控制，step=1 时仍逐时间步展示。
 fps = 10
 
-print(f"Animation: {n_frames} frames, {n_frames/fps:.0f}s @ {fps}fps (step={step})")
+print(
+    f"Animation: {n_frames} frames, {n_frames/fps:.0f}s @ {fps}fps "
+    f"({sampling_mode}, {sampling_detail})"
+)
 print(f"t=[{sampled_t[0]}..{sampled_t[-1]}], keyframes={len(keyframe_t)}")
 
 # ===== Figure =====
@@ -194,7 +219,7 @@ align_text = ax.text(0.98, 0.02, "", transform=ax.transAxes, fontsize=8,
 def update(i):
     t = sampled_t[i]
     mins, secs = t // 60, t % 60
-    title.set_text(f"Scenario 1 (1A1B) — t={t} ({mins}m{secs}s) — 48 centrifuges D+I+R")
+    title.set_text(f"{SCENARIO_DIR} — t={t} ({mins}m{secs}s) — 48 centrifuges D+I+R")
 
     # Update machine colors
     st = cum_states.get(t, {})

@@ -1,0 +1,56 @@
+# CP-SAT 完整任务规划
+
+## 重构前真实调用链
+
+正式脚本曾直接调用 `fallback.manual_assign_scenario_1/2`。任务归属和顺序均由
+坐标排序及列表拼接产生；`cp_sat_model.py` 的 `assignment_only` 只包含
+`x[operation, robot]`，没有开始/结束时间、旅行时间或序列变量。因此仿真器读取
+的是手工队列，历史结果中的 `fallback_used=true` 是入口主动选择 baseline，
+并非 CP-SAT 求解失败。
+
+## 当前正式调用链
+
+`solver.scheduler.solve_assignment_schedule`
+→ footprint-aware `StaticAStar` 旅行矩阵
+→ `CpSatScheduler(assignment_schedule)`
+→ `schedule_extractor` 沿选中的 arc successor 链提取
+→ `SimulationEngine` 按该顺序执行
+→ `SpaceTimeAStar` 仅决定逐时间步路径，不重排操作。
+
+正式配置默认 `allow_fallback=false`。求解状态不是 FEASIBLE/OPTIMAL 时抛出
+`SchedulingFailure`；只有显式 baseline 或 `allow_fallback=true` 才能调用手工策略。
+
+## 模型
+
+- `assigned[o,r]`：合法机器人唯一分配；
+- `start[o]`、`end[o]`；
+- `optional_interval[o,r]` + 每机器人 `AddNoOverlap`；
+- `arc[r,i,j]`、虚拟 START/END 与 `AddCircuit`；
+- arc 蕴含静态 A* 旅行时间；
+- 每机 D→I→R；
+- 可配置 D/R 同一 A；
+- 可配置第二列首任务偏好、列内自上而下偏好/硬约束、换列惩罚；
+- 额外路径反馈 precedence `(before, after, delay)`。
+
+分阶段目标：先 makespan，再固定 makespan 容差优化旅行时间，最后优化换列、
+同类型负载差、偏好惩罚和不必要的晚开始。A* 最近邻仅作为 CP-SAT warm-start
+hint，不添加固定 arc；最终顺序只来自求解器选中的 arc。
+
+## 职责边界与限制
+
+CP-SAT 负责高层分配、顺序、时间与静态旅行；Space-Time A* 负责 2×4 本体、
+扫掠、预约和动态等待。路径失败会产生 `PlanningConflict`，可作为下一轮
+`additional_precedence_constraints` 输入。
+
+当前 1A1B、2A1B、4A2B 均已完成端到端零碰撞验证。多机器人场景目前采用
+保守的动态协调策略（必要时先清空通道/回停车位），因此路径层实际完工时间
+明显大于 CP-SAT 的静态计划 makespan。后续优化重点是把 `PlanningConflict`
+自动闭环回灌给 CP-SAT 重求解，并减少过度保守的全局让行。
+
+最近一次验证（`scripts/run_cp_sat_validation.py`）：
+
+| 场景 | CP-SAT 状态 | fallback | CP-SAT makespan | 实际完工时间 | 碰撞 | 硬约束违规 |
+|---|---:|---:|---:|---:|---:|---:|
+| 1A1B | FEASIBLE | false | 1295 | 1408 | 0 | 0 |
+| 2A1B | FEASIBLE | false | 1105 | 8890 | 0 | 0 |
+| 4A2B | FEASIBLE | false | 533 | 8840 | 0 | 0 |
