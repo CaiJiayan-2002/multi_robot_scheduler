@@ -124,6 +124,93 @@ outputs/scenario_1/cp_sat_current_video/animation_smooth.mp4
 说明任务顺序来自 CP-SAT 求解器，而不是 row-major、column-major 或其他
 手工排序代码。
 
+## 2A1B 场景 test6 代码使用说明
+
+`scenario_2/test6` 表示 2 台 A 类机器人和 1 台 B 类机器人协同完成同一批
+48 台离心机的拆卸、检测和安装。该结果用于验证多机器人并行执行：A_1、
+A_2 和 B_1 可以同时处于工作状态，路径层仍保持零碰撞和零硬约束违规。
+
+### 运行 2A1B test6
+
+```bash
+source .venv/bin/activate
+python scripts/run_scenario_2_full.py test6
+```
+
+运行后结果会写入：
+
+```text
+outputs/scenario_2/test6/
+```
+
+主要输出文件包括：
+
+- `metrics.json`：2A1B 指标，包括 makespan、路径长度、等待时间、碰撞数、
+  约束违规数、重规划次数和求解器状态；
+- `event_log.jsonl`：逐时间步事件日志，可用于检查 A_1/A_2/B_1 是否并行工作；
+- `gantt.png`：三台机器人作业甘特图；
+- `trajectories.png`：三台机器人轨迹图；
+- `trajectories.json`：动画和轨迹分析使用的原始轨迹数据。
+
+### 生成 2A1B test6 动画
+
+```bash
+python scripts/create_animation_fast.py test6 scenario_2 10 24
+```
+
+生成的视频为：
+
+```text
+outputs/scenario_2/test6/animation_smooth.mp4
+```
+
+### scenario_2/test6 由哪些代码生成
+
+`scenario_2/test6` 的主要调用链如下：
+
+1. [scripts/run_scenario_2_full.py](scripts/run_scenario_2_full.py)  
+   创建 2A1B 场景、调用正式求解器、运行仿真、保存指标和事件日志。
+
+2. [src/solver/scheduler.py](src/solver/scheduler.py)  
+   正式求解入口，调用 `solve_assignment_schedule(...)`。默认
+   `allow_fallback=false`，求解失败不会静默切到手工队列。
+
+3. [src/solver/cp_sat_model.py](src/solver/cp_sat_model.py)  
+   OR-Tools CP-SAT 模型主体，负责决定操作分配、机器人完整操作顺序、
+   计划开始/结束时间、静态旅行时间衔接、工序前置关系和优化目标。
+
+4. [src/solver/schedule_extractor.py](src/solver/schedule_extractor.py)  
+   只沿 CP-SAT 选中的 arc successor 链提取顺序，不按坐标、机器编号或
+   列顺序重新排序。
+
+5. [src/solver/travel_time.py](src/solver/travel_time.py)  
+   使用 footprint-aware static A* 为 CP-SAT 提供操作之间的预计移动时间。
+
+6. [src/simulation/engine.py](src/simulation/engine.py)  
+   按 CP-SAT 给出的操作顺序执行仿真；Space-Time A* 负责逐时间步路径、
+   2 × 4 本体避碰、预约表、动态等待、按需让行和局部重规划。仿真器不重新
+   决定任务顺序。
+
+7. [scripts/render_scenario_outputs.py](scripts/render_scenario_outputs.py)  
+   根据事件日志生成甘特图、轨迹图和轨迹 JSON。
+
+8. [scripts/create_animation_fast.py](scripts/create_animation_fast.py)  
+   根据 `trajectories.json` 和 `event_log.jsonl` 生成逐时间步 MP4 动画。
+
+### 任务分配和列顺序策略
+
+2A1B 正式模式下，任务分配和执行顺序由 CP-SAT 求解器决定，不再由手工代码
+写死。当前约束强调“安全且可解释”的列内拆机行为：
+
+- 同一列的 `DISASSEMBLE` 操作作为列级工作包，由同一台 A 机器人负责；
+- 同一列拆机按从主干道进入更自然的自下而上顺序执行；
+- 但系统没有写死“机器人必须完成一整列所有拆卸、检测、安装后才能进入下一列”；
+- A_1、A_2、B_1 的作业可在不同列、不同工序之间形成流水线并行；
+- 路径层允许多机器人同时移动，由时空预约表和 safety guard 保证零碰撞。
+
+也就是说，列级约束只约束同一列拆机不要跳过中间机器；整体任务分配、跨列切换、
+检测/安装衔接和并行时机仍由 CP-SAT 与路径规划共同执行。
+
 ## 快速开始
 
 运行完整场景：
