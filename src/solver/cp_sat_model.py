@@ -226,6 +226,21 @@ class CpSatScheduler:
             d_id, i_id, r_id = f"{mid}_D", f"{mid}_I", f"{mid}_R"
             model.Add(end[d_id] <= start[i_id])
             model.Add(end[i_id] <= start[r_id])
+        if self.config.enforce_a_disassembly_priority:
+            disassembly_ops = [
+                op_id for op_id in operation_ids
+                if problem.operations[op_id].operation_type == OperationType.DISASSEMBLE
+            ]
+            install_ops = [
+                op_id for op_id in operation_ids
+                if problem.operations[op_id].operation_type == OperationType.INSTALL
+            ]
+            for d_id in disassembly_ops:
+                for r_id in install_ops:
+                    # A 机拆机优先：只要系统内还有未完成拆机列，A 不进入安装。
+                    # 这是 test8 的硬约束，用于形成“先拆机列块、再安装列块”
+                    # 的执行策略；检测仍可由 B 机与 A 机拆机并行流水线推进。
+                    model.Add(end[d_id] <= start[r_id])
         for before, after, delay in self.config.additional_precedence_constraints:
             if before not in end or after not in start:
                 raise ValueError(f"unknown repair precedence: {before} -> {after}")
@@ -235,6 +250,92 @@ class CpSatScheduler:
             model.AddNoOverlap(
                 intervals[(op_id, rid)] for op_id in eligible_by_robot[rid]
             )
+
+        if self.config.enforce_robot_column_blocks:
+            unique_columns = sorted({m.cells[0].x for m in problem.machines.values()})
+            ops_by_column = {
+                x: [
+                    op_id for op_id in operation_ids
+                    if problem.machines[problem.operations[op_id].machine_id].cells[0].x == x
+                ]
+                for x in unique_columns
+            }
+            for rid in robot_ids:
+                eligible_set = set(eligible_by_robot[rid])
+                if self.config.column_blocks_by_operation_type:
+                    operation_types = sorted({
+                        problem.operations[op_id].operation_type
+                        for op_id in eligible_by_robot[rid]
+                    }, key=lambda item: item.value)
+                else:
+                    operation_types = [None]
+
+                for op_type in operation_types:
+                    group_name = op_type.value if op_type is not None else "ALL"
+                    visited: dict[int, Any] = {}
+                    for x in unique_columns:
+                        column_ops = [
+                            op_id for op_id in ops_by_column[x]
+                            if op_id in eligible_set
+                            and (
+                                op_type is None
+                                or problem.operations[op_id].operation_type == op_type
+                            )
+                        ]
+                        visit = model.NewBoolVar(f"column_visit[{rid},{group_name},{x}]")
+                        visited[x] = visit
+                        if column_ops:
+                            assigned_sum = sum(assigned[(op_id, rid)] for op_id in column_ops)
+                            model.Add(assigned_sum >= 1).OnlyEnforceIf(visit)
+                            model.Add(assigned_sum == 0).OnlyEnforceIf(visit.Not())
+                        else:
+                            model.Add(visit == 0)
+
+                    for i, left_x in enumerate(unique_columns):
+                        left_ops = [
+                            op_id for op_id in ops_by_column[left_x]
+                            if op_id in eligible_set
+                            and (
+                                op_type is None
+                                or problem.operations[op_id].operation_type == op_type
+                            )
+                        ]
+                        if not left_ops:
+                            continue
+                        for right_x in unique_columns[i + 1:]:
+                            right_ops = [
+                                op_id for op_id in ops_by_column[right_x]
+                                if op_id in eligible_set
+                                and (
+                                    op_type is None
+                                    or problem.operations[op_id].operation_type == op_type
+                                )
+                            ]
+                            if not right_ops:
+                                continue
+                            left_before_right = model.NewBoolVar(
+                                f"column_order[{rid},{group_name},{left_x},{right_x}]"
+                            )
+                            for left_op in left_ops:
+                                for right_op in right_ops:
+                                    # 如果该机器人在同一工序组内同时访问两列，
+                                    # CP-SAT 必须为这两列选择整体先后顺序。
+                                    # test7 使用 ALL 组；test8 使用按工序类型
+                                    # 分组，以便 A 先拆机列块，再安装列块。
+                                    model.Add(end[left_op] <= start[right_op]).OnlyEnforceIf([
+                                        visited[left_x],
+                                        visited[right_x],
+                                        assigned[(left_op, rid)],
+                                        assigned[(right_op, rid)],
+                                        left_before_right,
+                                    ])
+                                    model.Add(end[right_op] <= start[left_op]).OnlyEnforceIf([
+                                        visited[left_x],
+                                        visited[right_x],
+                                        assigned[(left_op, rid)],
+                                        assigned[(right_op, rid)],
+                                        left_before_right.Not(),
+                                    ])
 
         arcs: dict[tuple[str, str, str], Any] = {}
         travel_terms = []

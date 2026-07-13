@@ -29,6 +29,9 @@ def extract_cp_sat_schedule(problem, config, solver, status, artifacts) -> Sched
         "load_gap": result.load_gap,
         "preference_penalty": solver.Value(artifacts.preference_penalty),
         "makespan_tolerance": config.makespan_tolerance,
+        "enforce_robot_column_blocks": config.enforce_robot_column_blocks,
+        "column_blocks_by_operation_type": config.column_blocks_by_operation_type,
+        "enforce_a_disassembly_priority": config.enforce_a_disassembly_priority,
     }
     result.objective = dict(result.solver_objective)
 

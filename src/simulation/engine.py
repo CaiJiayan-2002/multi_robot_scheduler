@@ -135,6 +135,7 @@ class SimulationEngine:
         # 事件日志
         self.event_log: list[dict] = []
         self.planning_conflicts: list[PlanningConflict] = []
+        self.enforce_a_disassembly_priority: bool = False
 
         # 仿真状态
         self._running: bool = False
@@ -203,6 +204,10 @@ class SimulationEngine:
             for mid, m in machines.items()
         }
         self.state_machine = MachineStateMachine(machine_copies)
+        self.enforce_a_disassembly_priority = bool(
+            getattr(schedule, "solver_objective", {})
+            .get("enforce_a_disassembly_priority", False)
+        )
 
         # 创建机器人运行时
         self.robots.clear()
@@ -419,6 +424,21 @@ class SimulationEngine:
             if operation is None:
                 self._log_event("error", f"{rid}: operation {next_op_id} not found")
                 robot.assigned_ops.pop(0)
+                continue
+
+            if (
+                self.enforce_a_disassembly_priority
+                and operation.operation_type == OperationType.INSTALL
+                and any(
+                    machine.state == MachineState.PENDING_DISASSEMBLY
+                    for machine in self.state_machine.machines.values()
+                )
+            ):
+                self._log_event(
+                    "wait_precedence",
+                    f"{rid}: delaying INSTALL because disassembly columns remain",
+                )
+                robot.status = RobotStatus.WAITING_PRECEDENCE
                 continue
 
             # 检查机器是否准备好
@@ -681,7 +701,15 @@ class SimulationEngine:
                         can_start, _ = self.state_machine.can_start_operation(
                             op.machine_id, op.operation_type, rid
                         )
-                        if can_start:
+                        priority_ok = not (
+                            self.enforce_a_disassembly_priority
+                            and op.operation_type == OperationType.INSTALL
+                            and any(
+                                machine.state == MachineState.PENDING_DISASSEMBLY
+                                for machine in self.state_machine.machines.values()
+                            )
+                        )
+                        if can_start and priority_ok:
                             robot.status = RobotStatus.IDLE
                             self._log_event("precedence_cleared",
                                 f"{rid}: precedence cleared, re-entering IDLE")

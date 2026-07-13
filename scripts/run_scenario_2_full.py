@@ -33,9 +33,17 @@ def main() -> None:
         "A_2": RobotSpec("A_2", RobotType.A, Cell(12, 28), footprint),
         "B_1": RobotSpec("B_1", RobotType.B, Cell(24, 28), footprint),
     }
+    enforce_column_blocks = experiment in {"test7", "test8"}
+    enforce_disassembly_priority = experiment == "test8"
     schedule = solve_assignment_schedule(
         terrain, machines, operations, robots,
-        SolverConfig(max_time_seconds=60, allow_fallback=False),
+        SolverConfig(
+            max_time_seconds=60,
+            allow_fallback=False,
+            enforce_robot_column_blocks=enforce_column_blocks,
+            column_blocks_by_operation_type=enforce_disassembly_priority,
+            enforce_a_disassembly_priority=enforce_disassembly_priority,
+        ),
     )
 
     engine = SimulationEngine()
@@ -74,6 +82,9 @@ def main() -> None:
             "solver_mode": schedule.solver_mode,
             "solver_status": schedule.solver_status,
             "sequence_source": schedule.operation_sequence_source,
+            "enforce_robot_column_blocks": enforce_column_blocks,
+            "column_blocks_by_operation_type": enforce_disassembly_priority,
+            "enforce_a_disassembly_priority": enforce_disassembly_priority,
         },
         "machine_completion": machine_summary,
         "timing": timing,

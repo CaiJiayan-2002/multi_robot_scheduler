@@ -17,6 +17,9 @@ class SolverConfig:
     enforce_top_down_within_column: bool = False
     enforce_bottom_up_disassembly_within_column: bool = True
     enforce_same_a_robot_for_column_disassembly: bool = True
+    enforce_robot_column_blocks: bool = False
+    column_blocks_by_operation_type: bool = False
+    enforce_a_disassembly_priority: bool = False
     penalize_column_switch: bool = True
     random_seed: int = 1
     # (before_operation_id, after_operation_id, required_delay)
