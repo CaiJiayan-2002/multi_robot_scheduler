@@ -31,6 +31,8 @@ class ModelArtifacts:
     column_switches: Any
     load_gap: Any
     preference_penalty: Any
+    max_first_start: Any
+    total_first_start: Any
 
 
 class CpSatScheduler:
@@ -104,6 +106,11 @@ class CpSatScheduler:
             + self._artifacts.preference_penalty * 100
             + sum(self._artifacts.start.values())
         )
+        if self.config.minimize_initial_start_wait:
+            secondary += (
+                self._artifacts.max_first_start * 1_000_000
+                + self._artifacts.total_first_start * 10_000
+            )
         self._model.Minimize(secondary)
         phase3_solver = new_solver(total_budget * 0.2)
         status3 = phase3_solver.Solve(self._model)
@@ -165,6 +172,52 @@ class CpSatScheduler:
                 for rid, robot in problem.robots.items():
                     if robot.robot_type == RobotType.A:
                         model.Add(assigned[(d_id, rid)] == assigned[(r_id, rid)])
+
+        if self.config.enforce_alternating_install_by_preferred_order:
+            a_robot_ids = sorted(
+                rid for rid, robot in problem.robots.items()
+                if robot.robot_type == RobotType.A
+            )
+            if not a_robot_ids:
+                raise ValueError("alternating install assignment requires A robots")
+            for rank, x in enumerate(self.config.preferred_install_column_order):
+                chosen_rid = a_robot_ids[rank % len(a_robot_ids)]
+                column_install_ops = [
+                    op_id for op_id in operation_ids
+                    if (
+                        problem.operations[op_id].operation_type == OperationType.INSTALL
+                        and problem.machines[problem.operations[op_id].machine_id].cells[0].x == x
+                    )
+                ]
+                for op_id in column_install_ops:
+                    for rid in a_robot_ids:
+                        model.Add(assigned[(op_id, rid)] == int(rid == chosen_rid))
+
+        if (
+            self.config.enforce_install_start_follows_preferred_order
+            and self.config.preferred_install_column_order
+        ):
+            install_start_by_column: dict[int, Any] = {}
+            for x in self.config.preferred_install_column_order:
+                starts_in_column = [
+                    start[op_id] for op_id in operation_ids
+                    if (
+                        problem.operations[op_id].operation_type == OperationType.INSTALL
+                        and problem.machines[problem.operations[op_id].machine_id].cells[0].x == x
+                    )
+                ]
+                if starts_in_column:
+                    col_start = model.NewIntVar(0, horizon, f"install_column_start[{x}]")
+                    model.AddMinEquality(col_start, starts_in_column)
+                    install_start_by_column[x] = col_start
+            ordered_columns = [
+                x for x in self.config.preferred_install_column_order
+                if x in install_start_by_column
+            ]
+            for earlier, later in zip(ordered_columns, ordered_columns[1:]):
+                # 只约束列安装“启动顺序”，不要求前一列全部装完后才能启动后一列。
+                # 这样 A_1/A_2 仍可交替并行，但更早被 B 检测好的列会先进入安装。
+                model.Add(install_start_by_column[earlier] <= install_start_by_column[later])
 
         if self.config.enforce_same_a_robot_for_column_disassembly:
             columns: dict[int, list[str]] = {}
@@ -251,8 +304,22 @@ class CpSatScheduler:
                 intervals[(op_id, rid)] for op_id in eligible_by_robot[rid]
             )
 
+        unique_columns = sorted({m.cells[0].x for m in problem.machines.values()})
+        column_disassembly_complete: dict[int, Any] = {}
+        if self.config.enforce_b_inspection_follows_disassembly_completion:
+            for x in unique_columns:
+                d_ends = [
+                    end[op_id] for op_id in operation_ids
+                    if (
+                        problem.operations[op_id].operation_type == OperationType.DISASSEMBLE
+                        and problem.machines[problem.operations[op_id].machine_id].cells[0].x == x
+                    )
+                ]
+                complete = model.NewIntVar(0, horizon, f"column_disassembly_complete[{x}]")
+                model.AddMaxEquality(complete, d_ends)
+                column_disassembly_complete[x] = complete
+
         if self.config.enforce_robot_column_blocks:
-            unique_columns = sorted({m.cells[0].x for m in problem.machines.values()})
             ops_by_column = {
                 x: [
                     op_id for op_id in operation_ids
@@ -316,6 +383,22 @@ class CpSatScheduler:
                             left_before_right = model.NewBoolVar(
                                 f"column_order[{rid},{group_name},{left_x},{right_x}]"
                             )
+                            if (
+                                self.config.enforce_b_inspection_follows_disassembly_completion
+                                and problem.robots[rid].robot_type == RobotType.B
+                                and op_type == OperationType.INSPECT
+                            ):
+                                # B 的检测列块顺序必须跟随 A 更早完成拆机的列：
+                                # 如果 B 选择先检测 left_x 再检测 right_x，则
+                                # left_x 的整列拆机完成时间不得晚于 right_x。
+                                model.Add(
+                                    column_disassembly_complete[left_x]
+                                    <= column_disassembly_complete[right_x]
+                                ).OnlyEnforceIf(left_before_right)
+                                model.Add(
+                                    column_disassembly_complete[right_x]
+                                    <= column_disassembly_complete[left_x]
+                                ).OnlyEnforceIf(left_before_right.Not())
                             for left_op in left_ops:
                                 for right_op in right_ops:
                                     # 如果该机器人在同一工序组内同时访问两列，
@@ -341,7 +424,6 @@ class CpSatScheduler:
         travel_terms = []
         switch_terms = []
         preference_terms = []
-        unique_columns = sorted({m.cells[0].x for m in problem.machines.values()})
         preferred_x = None
         if self.config.preferred_first_column is not None:
             idx = self.config.preferred_first_column - 1
@@ -423,6 +505,28 @@ class CpSatScheduler:
                                 model.Add(arc == 0)
                             else:
                                 preference_terms.append(arc)
+            if self.config.enforce_contiguous_bottom_up_disassembly_chain:
+                columns: dict[int, list[str]] = {}
+                for mid, machine in problem.machines.items():
+                    columns.setdefault(machine.cells[0].x, []).append(mid)
+                for machine_ids in columns.values():
+                    by_row_from_bottom = sorted(
+                        machine_ids,
+                        key=lambda mid: problem.machines[mid].row,
+                        reverse=True,
+                    )
+                    for lower, upper in zip(by_row_from_bottom, by_row_from_bottom[1:]):
+                        lower_op = f"{lower}_D"
+                        upper_op = f"{upper}_D"
+                        if lower_op not in ops or upper_op not in ops:
+                            continue
+                        # 强化“同一列拆机自下而上连续执行”：如果该 A 机器人
+                        # 负责这一列，相邻拆机操作必须在 CP-SAT 序列中直接相连，
+                        # 不能在 y=23→19、19→15 等相邻步骤之间插入其他任务。
+                        model.Add(arcs[(rid, lower_op, upper_op)] == 1).OnlyEnforceIf([
+                            assigned[(lower_op, rid)],
+                            assigned[(upper_op, rid)],
+                        ])
             model.AddCircuit(circuit_arcs)
 
         total_travel = model.NewIntVar(0, horizon * max(1, len(robot_ids)), "total_travel")
@@ -431,6 +535,33 @@ class CpSatScheduler:
         model.Add(column_switches == (sum(switch_terms) if switch_terms else 0))
         preference_penalty = model.NewIntVar(0, len(operation_ids) * 2, "preference_penalty")
         model.Add(preference_penalty == (sum(preference_terms) if preference_terms else 0))
+
+        first_start_terms = []
+        for rid in robot_ids:
+            first_start = model.NewIntVar(0, horizon, f"first_start[{rid}]")
+            first_arcs = [
+                arcs[(rid, "START", op_id)]
+                for op_id in eligible_by_robot[rid]
+                if (rid, "START", op_id) in arcs
+            ]
+            for op_id in eligible_by_robot[rid]:
+                first = arcs.get((rid, "START", op_id))
+                if first is None:
+                    continue
+                model.Add(first_start == start[op_id]).OnlyEnforceIf(first)
+            if (rid, "START", "END") in arcs:
+                model.Add(first_start == 0).OnlyEnforceIf(arcs[(rid, "START", "END")])
+            if not first_arcs:
+                model.Add(first_start == 0)
+            first_start_terms.append(first_start)
+        max_first_start = model.NewIntVar(0, horizon, "max_first_start")
+        total_first_start = model.NewIntVar(0, horizon * max(1, len(robot_ids)), "total_first_start")
+        if first_start_terms:
+            model.AddMaxEquality(max_first_start, first_start_terms)
+            model.Add(total_first_start == sum(first_start_terms))
+        else:
+            model.Add(max_first_start == 0)
+            model.Add(total_first_start == 0)
 
         load_gaps = []
         for robot_type in (RobotType.A, RobotType.B):
@@ -464,7 +595,7 @@ class CpSatScheduler:
         artifacts = ModelArtifacts(
             operation_ids, eligible_by_robot, assigned, start, end, intervals,
             arcs, makespan, total_travel, column_switches, load_gap,
-            preference_penalty,
+            preference_penalty, max_first_start, total_first_start,
         )
         if not self._add_single_pair_warm_start(model, problem, artifacts):
             self._add_multi_robot_warm_start(model, problem, artifacts)

@@ -28,10 +28,24 @@ def extract_cp_sat_schedule(problem, config, solver, status, artifacts) -> Sched
         "column_switch_count": result.column_switch_count,
         "load_gap": result.load_gap,
         "preference_penalty": solver.Value(artifacts.preference_penalty),
+        "max_first_start": solver.Value(artifacts.max_first_start),
+        "total_first_start": solver.Value(artifacts.total_first_start),
         "makespan_tolerance": config.makespan_tolerance,
         "enforce_robot_column_blocks": config.enforce_robot_column_blocks,
         "column_blocks_by_operation_type": config.column_blocks_by_operation_type,
         "enforce_a_disassembly_priority": config.enforce_a_disassembly_priority,
+        "enforce_b_inspection_follows_disassembly_completion": (
+            config.enforce_b_inspection_follows_disassembly_completion
+        ),
+        "preferred_install_column_order": list(config.preferred_install_column_order),
+        "enforce_install_start_follows_preferred_order": (
+            config.enforce_install_start_follows_preferred_order
+        ),
+        "enforce_alternating_install_by_preferred_order": (
+            config.enforce_alternating_install_by_preferred_order
+        ),
+        "minimize_initial_start_wait": config.minimize_initial_start_wait,
+        "allow_early_service_start": config.allow_early_service_start,
     }
     result.objective = dict(result.solver_objective)
 

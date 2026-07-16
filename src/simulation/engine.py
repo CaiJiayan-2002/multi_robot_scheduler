@@ -136,6 +136,12 @@ class SimulationEngine:
         self.event_log: list[dict] = []
         self.planning_conflicts: list[PlanningConflict] = []
         self.enforce_a_disassembly_priority: bool = False
+        self.enforce_b_inspection_follows_disassembly_completion: bool = False
+        self.enforce_install_follows_inspection_order: bool = False
+        self.allow_early_service_start: bool = False
+        self.column_disassembly_completed_at: dict[int, int] = {}
+        self.column_inspection_completed_at: dict[int, int] = {}
+        self.install_column_owner: dict[int, str] = {}
 
         # 仿真状态
         self._running: bool = False
@@ -207,6 +213,18 @@ class SimulationEngine:
         self.enforce_a_disassembly_priority = bool(
             getattr(schedule, "solver_objective", {})
             .get("enforce_a_disassembly_priority", False)
+        )
+        self.enforce_b_inspection_follows_disassembly_completion = bool(
+            getattr(schedule, "solver_objective", {})
+            .get("enforce_b_inspection_follows_disassembly_completion", False)
+        )
+        self.enforce_install_follows_inspection_order = bool(
+            getattr(schedule, "solver_objective", {})
+            .get("enforce_alternating_install_by_preferred_order", False)
+        )
+        self.allow_early_service_start = bool(
+            getattr(schedule, "solver_objective", {})
+            .get("allow_early_service_start", False)
         )
 
         # 创建机器人运行时
@@ -380,6 +398,205 @@ class SimulationEngine:
     # 内部方法：规划
     # ==================================================================
 
+    def _prioritize_b_inspection_queue(self, robot: RobotRuntime) -> None:
+        """按实际拆机完成时间重排 B 的待检测列块。
+
+        CP-SAT 会在计划层约束 B 的检测列顺序跟随列拆机完成时间；但动态
+        路径重规划可能改变实际完成顺序。这里在不改变 B 只做 INSPECT 的
+        前提下，把已实际完成拆机且仍待检测的最早列块提前，避免 B 先进入
+        较晚完成拆机的列。
+        """
+        if robot.spec.robot_type != RobotType.B or not robot.assigned_ops:
+            return
+        next_op = self.operations.get(robot.assigned_ops[0])
+        if next_op is None or next_op.operation_type != OperationType.INSPECT:
+            return
+
+        ready_columns: list[tuple[int, int]] = []
+        seen_columns: set[int] = set()
+        for op_id in robot.assigned_ops:
+            op = self.operations.get(op_id)
+            if op is None or op.operation_type != OperationType.INSPECT:
+                continue
+            x = self.machines[op.machine_id].cells[0].x
+            if x in seen_columns:
+                continue
+            seen_columns.add(x)
+            completed_at = self.column_disassembly_completed_at.get(x)
+            if completed_at is None:
+                continue
+            can_start_any = any(
+                self.operations[candidate].operation_type == OperationType.INSPECT
+                and self.machines[self.operations[candidate].machine_id].cells[0].x == x
+                and self.state_machine.can_start_operation(
+                    self.operations[candidate].machine_id,
+                    OperationType.INSPECT,
+                    robot.spec.robot_id,
+                )[0]
+                for candidate in robot.assigned_ops
+            )
+            if can_start_any:
+                ready_columns.append((completed_at, x))
+        if not ready_columns:
+            return
+        _, chosen_x = min(ready_columns)
+        current_x = self.machines[next_op.machine_id].cells[0].x
+        if chosen_x == current_x:
+            return
+
+        chosen_ops = [
+            op_id for op_id in robot.assigned_ops
+            if self.machines[self.operations[op_id].machine_id].cells[0].x == chosen_x
+        ]
+        remaining_ops = [op_id for op_id in robot.assigned_ops if op_id not in chosen_ops]
+        robot.assigned_ops = chosen_ops + remaining_ops
+        self._log_event(
+            "inspection_priority",
+            f"{robot.spec.robot_id}: prioritizing inspection column x={chosen_x} "
+            f"completed_at={self.column_disassembly_completed_at[chosen_x]}",
+        )
+
+    def _prioritize_a_install_queue(self, rid: str, robot: RobotRuntime) -> None:
+        """按实际 B 检测完成列顺序和 A1/A2 交替规则重排安装队列。"""
+        if (
+            not self.enforce_install_follows_inspection_order
+            or robot.spec.robot_type != RobotType.A
+            or not robot.assigned_ops
+        ):
+            return
+        next_op = self.operations.get(robot.assigned_ops[0])
+        if next_op is None or next_op.operation_type != OperationType.INSTALL:
+            return
+
+        a_ids = sorted(
+            other_rid for other_rid, runtime in self.robots.items()
+            if runtime.spec.robot_type == RobotType.A
+        )
+        if not a_ids:
+            return
+        ordered_ready_columns = [
+            x for x, _ in sorted(
+                self.column_inspection_completed_at.items(),
+                key=lambda item: item[1],
+            )
+        ]
+        for index, x in enumerate(ordered_ready_columns):
+            if x not in self.install_column_owner:
+                self._assign_install_column_owner(x, a_ids[index % len(a_ids)])
+
+        candidate_columns: list[tuple[int, int]] = []
+        seen_columns: set[int] = set()
+        for op_id in robot.assigned_ops:
+            op = self.operations.get(op_id)
+            if op is None or op.operation_type != OperationType.INSTALL:
+                continue
+            x = self.machines[op.machine_id].cells[0].x
+            if x in seen_columns:
+                continue
+            seen_columns.add(x)
+            if self.install_column_owner.get(x) != rid:
+                continue
+            inspected_at = self.column_inspection_completed_at.get(x)
+            if inspected_at is None:
+                continue
+            can_start_any = any(
+                self.operations[candidate].operation_type == OperationType.INSTALL
+                and self.machines[self.operations[candidate].machine_id].cells[0].x == x
+                and self.state_machine.can_start_operation(
+                    self.operations[candidate].machine_id,
+                    OperationType.INSTALL,
+                    rid,
+                )[0]
+                for candidate in robot.assigned_ops
+            )
+            if can_start_any:
+                candidate_columns.append((inspected_at, x))
+
+        if not candidate_columns:
+            return
+        _, chosen_x = min(candidate_columns)
+        current_x = self.machines[next_op.machine_id].cells[0].x
+        current_owner = self.install_column_owner.get(current_x)
+        if chosen_x == current_x and current_owner == rid:
+            return
+
+        chosen_ops = [
+            op_id for op_id in robot.assigned_ops
+            if self.machines[self.operations[op_id].machine_id].cells[0].x == chosen_x
+        ]
+        remaining_ops = [op_id for op_id in robot.assigned_ops if op_id not in chosen_ops]
+        robot.assigned_ops = chosen_ops + remaining_ops
+        self._log_event(
+            "install_priority",
+            f"{rid}: prioritizing install column x={chosen_x} "
+            f"inspected_at={self.column_inspection_completed_at[chosen_x]}",
+        )
+
+    def _assign_install_column_owner(self, x: int, owner_rid: str) -> None:
+        """把实际检测完成列的待安装任务转交给交替规则指定的 A 机器人。"""
+        if self.install_column_owner.get(x) == owner_rid:
+            return
+        owner = self.robots.get(owner_rid)
+        if owner is None:
+            return
+        column_install_ops = {
+            op_id for op_id, op in self.operations.items()
+            if (
+                op.operation_type == OperationType.INSTALL
+                and self.machines[op.machine_id].cells[0].x == x
+                and op_id not in {
+                    done
+                    for runtime in self.robots.values()
+                    for done in runtime.completed_ops
+                }
+            )
+        }
+        if not column_install_ops:
+            return
+
+        # 不抢占已经开始执行/正在前往执行的安装任务，否则会把某列任务
+        # 从一个 A 机的运行时状态里“拔掉”，造成队列丢失或长期等待。
+        active_install_ops = {
+            runtime.current_op_id
+            for runtime in self.robots.values()
+            if runtime.current_op_id in column_install_ops
+        }
+        if active_install_ops:
+            self.install_column_owner.setdefault(x, owner_rid)
+            return
+
+        self.install_column_owner[x] = owner_rid
+        for runtime in self.robots.values():
+            if runtime.spec.robot_type != RobotType.A:
+                continue
+            runtime.assigned_ops = [
+                op_id for op_id in runtime.assigned_ops
+                if op_id not in column_install_ops
+            ]
+
+        ordered = sorted(
+            column_install_ops,
+            key=lambda op_id: self.machines[self.operations[op_id].machine_id].row,
+            reverse=True,
+        )
+        owner.assigned_ops.extend(ordered)
+
+        # 如果 A 机已经完成原队列并开始返航，新的装机任务应取消返航并
+        # 立刻回到可调度状态；否则它会一路回家后再卡在 FINISHED/RETURN 路径。
+        if owner.current_op_id == "__RETURN__":
+            self.reservation_table.release_future(owner_rid, self.current_time)
+            owner.current_op_id = None
+            owner.current_path = None
+            owner.path_index = 0
+            owner.status = RobotStatus.IDLE
+        if owner.finished or owner.status == RobotStatus.FINISHED:
+            owner.finished = False
+            owner.status = RobotStatus.IDLE
+        self._log_event(
+            "install_assignment",
+            f"column x={x} assigned to {owner_rid} for installation",
+        )
+
     def _plan_idle_robots(self) -> None:
         """为所有 IDLE 状态的机器人规划下一个任务的路径。"""
         # *** 注入静止机器人位置到预约表 ***
@@ -418,6 +635,11 @@ class SimulationEngine:
                     pass
                 continue
 
+            if self.enforce_b_inspection_follows_disassembly_completion:
+                self._prioritize_b_inspection_queue(robot)
+            if self.enforce_install_follows_inspection_order:
+                self._prioritize_a_install_queue(rid, robot)
+
             # 获取下一个操作
             next_op_id = robot.assigned_ops[0]
             operation = self.operations.get(next_op_id)
@@ -425,6 +647,41 @@ class SimulationEngine:
                 self._log_event("error", f"{rid}: operation {next_op_id} not found")
                 robot.assigned_ops.pop(0)
                 continue
+
+            if (
+                self.enforce_install_follows_inspection_order
+                and operation.operation_type == OperationType.INSTALL
+                and robot.spec.robot_type == RobotType.A
+            ):
+                install_x = self.machines[operation.machine_id].cells[0].x
+                if install_x not in self.column_inspection_completed_at:
+                    self._log_event(
+                        "wait_precedence",
+                        f"{rid}: install column x={install_x} waits for full-column inspection completion",
+                    )
+                    continue
+
+                a_ids = sorted(
+                    other_rid for other_rid, runtime in self.robots.items()
+                    if runtime.spec.robot_type == RobotType.A
+                )
+                ordered_columns = [
+                    col for col, _ in sorted(
+                        self.column_inspection_completed_at.items(),
+                        key=lambda item: item[1],
+                    )
+                ]
+                if a_ids and install_x in ordered_columns:
+                    owner_rid = a_ids[ordered_columns.index(install_x) % len(a_ids)]
+                    if install_x not in self.install_column_owner:
+                        self._assign_install_column_owner(install_x, owner_rid)
+                    if self.install_column_owner.get(install_x) != rid:
+                        self._log_event(
+                            "wait_precedence",
+                            f"{rid}: install column x={install_x} assigned to "
+                            f"{self.install_column_owner.get(install_x)}",
+                        )
+                        continue
 
             if (
                 self.enforce_a_disassembly_priority
@@ -513,7 +770,11 @@ class SimulationEngine:
 
             # CP-SAT 的 start 是服务开始下界。若静态计划留有时间余量，
             # 在目标位等待，路径规划器不得提前改变任务顺序或开工作业。
-            planned_start = robot.planned_start_by_op.get(next_op_id, -1)
+            planned_start = (
+                -1
+                if self.allow_early_service_start
+                else robot.planned_start_by_op.get(next_op_id, -1)
+            )
             if path and planned_start > path[-1].t:
                 goal = path[-1]
                 for wait_t in range(path[-1].t + 1, planned_start + 1):
@@ -651,20 +912,61 @@ class SimulationEngine:
             f"{rid}: returning to start ({start_anchor.x},{start_anchor.y}), "
             f"path={len(path)} steps, arrival_t={path[-1].t}")
 
+    def _yield_candidates(self, robot: RobotRuntime) -> list[Cell]:
+        """生成就近让行候选点，优先选择主干道附近而不是地图角落。"""
+        if robot.current_anchor is None:
+            return [robot.spec.start_anchor]
+        footprint_width = max(offset.x for offset in self.footprint.offsets) + 1
+        footprint_height = max(offset.y for offset in self.footprint.offsets) + 1
+        max_x = self.terrain.shape[1] - footprint_width + 1
+        trunk_y = self.pose_graph.trunk_y_threshold
+        current_x = max(1, min(max_x, robot.current_anchor.x))
+        candidates: list[Cell] = []
+        for y in (trunk_y, min(self.terrain.shape[0] - footprint_height + 1, 28)):
+            for dx in (0, -2, 2, -4, 4, -8, 8):
+                x = max(1, min(max_x, current_x + dx))
+                cell = Cell(x, y)
+                if cell not in candidates:
+                    candidates.append(cell)
+        if robot.spec.start_anchor not in candidates:
+            candidates.append(robot.spec.start_anchor)
+        return sorted(
+            candidates,
+            key=lambda c: (
+                abs(c.x - robot.current_anchor.x) + abs(c.y - robot.current_anchor.y),
+                c == robot.spec.start_anchor,
+            ),
+        )
+
     def _plan_yield_to_home(self, rid: str, robot: RobotRuntime) -> bool:
-        """为低优先级机器人规划到其第28行停车位的主动让行路径。"""
-        home = robot.spec.start_anchor
-        if robot.current_anchor == home:
+        """为低优先级机器人规划到就近安全停车点的主动让行路径。"""
+        if robot.current_anchor is None:
             robot.yield_requested = False
             return False
-        path = self.space_time_astar.plan(
-            robot.current_anchor,
-            home,
-            self.current_time,
-            min(self._max_steps, self.current_time + self._planning_window),
-            robot_id=rid,
-        )
-        if path is None or not self.space_time_astar.reserve_path(path, rid):
+        if robot.current_anchor == robot.spec.start_anchor:
+            robot.yield_requested = False
+            return False
+        path = None
+        target = None
+        for candidate in self._yield_candidates(robot):
+            if candidate == robot.current_anchor:
+                continue
+            if not self.pose_graph.is_valid_pose(candidate):
+                continue
+            candidate_path = self.space_time_astar.plan(
+                robot.current_anchor,
+                candidate,
+                self.current_time,
+                min(self._max_steps, self.current_time + self._planning_window),
+                robot_id=rid,
+            )
+            if candidate_path is None:
+                continue
+            if self.space_time_astar.reserve_path(candidate_path, rid):
+                path = candidate_path
+                target = candidate
+                break
+        if path is None or target is None:
             robot.status = RobotStatus.WAITING_CONFLICT
             robot.retry_after = self.current_time + 8
             return True
@@ -673,7 +975,7 @@ class SimulationEngine:
         robot.current_op_id = "__YIELD__"
         robot.status = RobotStatus.MOVING
         self._log_event("yield_planned",
-            f"{rid}: yielding to parking position ({home.x},{home.y})")
+            f"{rid}: yielding to nearby parking position ({target.x},{target.y})")
         return True
 
     # ==================================================================
@@ -962,6 +1264,51 @@ class SimulationEngine:
                         f"{rid}: completed {op.operation_type.value} "
                         f"on {op.machine_id}, "
                         f"machine state={self.state_machine.machines[op.machine_id].state.name}")
+                    if op.operation_type == OperationType.DISASSEMBLE:
+                        x = self.machines[op.machine_id].cells[0].x
+                        column_machine_ids = [
+                            mid for mid, machine in self.machines.items()
+                            if machine.cells[0].x == x
+                        ]
+                        if all(
+                            self.state_machine.machines[mid].state
+                            != MachineState.PENDING_DISASSEMBLY
+                            for mid in column_machine_ids
+                        ):
+                            self.column_disassembly_completed_at.setdefault(
+                                x, self.current_time
+                            )
+                    if op.operation_type == OperationType.INSPECT:
+                        x = self.machines[op.machine_id].cells[0].x
+                        column_machine_ids = [
+                            mid for mid, machine in self.machines.items()
+                            if machine.cells[0].x == x
+                        ]
+                        if all(
+                            self.state_machine.machines[mid].state
+                            not in (
+                                MachineState.PENDING_DISASSEMBLY,
+                                MachineState.PENDING_INSPECTION,
+                            )
+                            for mid in column_machine_ids
+                        ):
+                            self.column_inspection_completed_at.setdefault(
+                                x, self.current_time
+                            )
+                            if self.enforce_install_follows_inspection_order:
+                                a_ids = sorted(
+                                    other_rid for other_rid, runtime in self.robots.items()
+                                    if runtime.spec.robot_type == RobotType.A
+                                )
+                                ordered_columns = [
+                                    col for col, _ in sorted(
+                                        self.column_inspection_completed_at.items(),
+                                        key=lambda item: item[1],
+                                    )
+                                ]
+                                if a_ids and x in ordered_columns:
+                                    owner_rid = a_ids[ordered_columns.index(x) % len(a_ids)]
+                                    self._assign_install_column_owner(x, owner_rid)
 
                 robot.completed_ops.append(op_id if op_id else "")
                 robot.current_op_id = None

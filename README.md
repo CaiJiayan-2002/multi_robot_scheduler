@@ -144,6 +144,90 @@ outputs/scenario_2/test8/
 A_1/A_2/B_1 必须先做哪一列。三台机器人仍可以并行工作，test8 的验证结果中
 最大同时工作机器人数为 3，碰撞和硬约束违规均为 0。
 
+### scenario2 / v2.3：等待/避让时间优化 + test12
+
+当前 v2.3 对应推荐结果为 `scenario_2/test12`。
+
+运行入口：
+
+```bash
+python scripts/run_scenario_2_full.py test12
+```
+
+结果目录：
+
+```text
+outputs/scenario_2/test12/
+```
+
+v2.3 继续沿用 v2.2/v2.2 后续版本中的核心约束：
+
+- 2 台 A 机器人 + 1 台 B 机器人可以同时移动和工作；
+- 每台机器人按列块执行自己承担的任务；
+- 同一列拆机由同一台 A 机器人负责；
+- 同一列拆机自下而上连续执行；
+- A 机在仍有未拆列时优先执行拆机；
+- B 机优先进入 A 更早完成拆机的列进行检测；
+- A 机装机任务按 B 实际整列检测完成顺序交替分配给 A_1 / A_2；
+- 避让时优先使用附近主干道/停车点，不再默认回到地图角落。
+
+v2.3 新增的重点是减少“机器人已经到达目标但仍按保守计划时间原地等待”的
+浪费。代码中新增两个正式配置：
+
+- `minimize_initial_start_wait=True`  
+  在 CP-SAT 第三阶段目标中加入每台机器人首个操作开始时间，鼓励 A_1、A_2、
+  B_1 尽早进入流水线，避免某台机器人长时间不开工。
+
+- `allow_early_service_start=True`  
+  仿真执行时，如果机器人已经到达目标、状态机确认工序前置条件满足、路径预约和
+  碰撞检查安全，则允许早于 CP-SAT 的保守 `planned_start_time` 开始作业。
+  该优化不改变 CP-SAT 决定的任务分配和任务顺序，只消除运行期不必要的静态等待。
+
+`scripts/run_scenario_2_full.py` 会在 `metrics.json` 中额外输出：
+
+```json
+{
+  "runtime_wait_yield_analysis": {
+    "first_work_start": {},
+    "by_robot": {},
+    "total": {}
+  }
+}
+```
+
+该字段用于衡量：
+
+- 每台机器人第一次开工时间；
+- scheduled path wait；
+- precedence wait；
+- conflict wait；
+- yield time；
+- 各机器人总等待与总避让时间。
+
+当前 `test12` 验证结果：
+
+- makespan：1094；
+- 完成机器：48 / 48；
+- 完成操作：144 / 144；
+- 碰撞：0；
+- 约束违规：0；
+- replans：5；
+- A_1 首次开工：t=6；
+- A_2 首次开工：t=6；
+- B_1 首次开工：t=31。
+
+生成动画：
+
+```bash
+python scripts/create_animation_fast.py test12 scenario_2 10 24
+```
+
+生成的视频为：
+
+```text
+outputs/scenario_2/test12/animation_smooth.mp4
+```
+
 ## 核心功能
 
 - 2 × 4 footprint 姿态、转移及扫掠区域碰撞验证
@@ -237,23 +321,24 @@ outputs/scenario_1/cp_sat_current_video/animation_smooth.mp4
 说明任务顺序来自 CP-SAT 求解器，而不是 row-major、column-major 或其他
 手工排序代码。
 
-## 2A1B 场景 test8 代码使用说明
+## 2A1B 场景 test8 / test12 代码使用说明
 
-`scenario_2/test8` 表示 2 台 A 类机器人和 1 台 B 类机器人协同完成同一批
-48 台离心机的拆卸、检测和安装。该结果用于验证多机器人并行执行：A_1、
-A_2 和 B_1 可以同时处于工作状态，且每台机器人按列块完成自己承担的任务。
+`scenario_2/test8` 是 v2.2 的列块约束版本；`scenario_2/test12` 是当前
+v2.3 推荐版本，在 test8/test11 的基础上继续优化等待时间和避让时间。
+二者都表示 2 台 A 类机器人和 1 台 B 类机器人协同完成同一批 48 台离心机的
+拆卸、检测和安装。当前建议优先运行 `test12`。
 
-### 运行 2A1B test8
+### 运行 2A1B test12
 
 ```bash
 source .venv/bin/activate
-python scripts/run_scenario_2_full.py test8
+python scripts/run_scenario_2_full.py test12
 ```
 
 运行后结果会写入：
 
 ```text
-outputs/scenario_2/test8/
+outputs/scenario_2/test12/
 ```
 
 主要输出文件包括：
@@ -265,21 +350,21 @@ outputs/scenario_2/test8/
 - `trajectories.png`：三台机器人轨迹图；
 - `trajectories.json`：动画和轨迹分析使用的原始轨迹数据。
 
-### 生成 2A1B test8 动画
+### 生成 2A1B test12 动画
 
 ```bash
-python scripts/create_animation_fast.py test8 scenario_2 10 24
+python scripts/create_animation_fast.py test12 scenario_2 10 24
 ```
 
 生成的视频为：
 
 ```text
-outputs/scenario_2/test8/animation_smooth.mp4
+outputs/scenario_2/test12/animation_smooth.mp4
 ```
 
-### scenario_2/test8 由哪些代码生成
+### scenario_2/test12 由哪些代码生成
 
-`scenario_2/test8` 的主要调用链如下：
+`scenario_2/test12` 的主要调用链如下：
 
 1. [scripts/run_scenario_2_full.py](scripts/run_scenario_2_full.py)  
    创建 2A1B 场景、调用正式求解器、运行仿真、保存指标和事件日志。
@@ -322,8 +407,10 @@ outputs/scenario_2/test8/animation_smooth.mp4
 - A_1、A_2、B_1 的作业可在不同列、不同工序之间形成流水线并行；
 - 路径层允许多机器人同时移动，由时空预约表和 safety guard 保证零碰撞。
 
-也就是说，v2.2 会限制机器人不要在列块之间来回穿插；但列块分配、列块先后顺序、
-检测/安装衔接和并行时机仍由 CP-SAT 与路径规划共同执行。
+也就是说，v2.3 会限制机器人不要在列块之间来回穿插；但列块分配、列块先后顺序、
+检测/安装衔接和并行时机仍由 CP-SAT 与路径规划共同执行。相比 v2.2，v2.3
+进一步减少了 planned start 带来的不必要等待，并在指标文件中显式统计每台机器人的
+等待时间与避让时间。
 
 ## 快速开始
 
