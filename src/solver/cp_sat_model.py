@@ -73,7 +73,7 @@ class CpSatScheduler:
         def new_solver(seconds: float):
             solver = cp_model.CpSolver()
             solver.parameters.max_time_in_seconds = max(1.0, seconds)
-            solver.parameters.num_search_workers = 8
+            solver.parameters.num_search_workers = self.config.num_search_workers
             solver.parameters.random_seed = self.config.random_seed
             return solver
 
@@ -173,6 +173,26 @@ class CpSatScheduler:
                     if robot.robot_type == RobotType.A:
                         model.Add(assigned[(d_id, rid)] == assigned[(r_id, rid)])
 
+        if self.config.enforce_alternating_disassembly_by_preferred_order:
+            a_robot_ids = sorted(
+                rid for rid, robot in problem.robots.items()
+                if robot.robot_type == RobotType.A
+            )
+            if not a_robot_ids:
+                raise ValueError("alternating disassembly assignment requires A robots")
+            for rank, x in enumerate(self.config.preferred_disassembly_column_order):
+                chosen_rid = a_robot_ids[rank % len(a_robot_ids)]
+                column_disassembly_ops = [
+                    op_id for op_id in operation_ids
+                    if (
+                        problem.operations[op_id].operation_type == OperationType.DISASSEMBLE
+                        and problem.machines[problem.operations[op_id].machine_id].cells[0].x == x
+                    )
+                ]
+                for op_id in column_disassembly_ops:
+                    for rid in a_robot_ids:
+                        model.Add(assigned[(op_id, rid)] == int(rid == chosen_rid))
+
         if self.config.enforce_alternating_install_by_preferred_order:
             a_robot_ids = sorted(
                 rid for rid, robot in problem.robots.items()
@@ -237,6 +257,25 @@ class CpSatScheduler:
                         # 列是自然的拆机工作包；具体哪台 A 负责该列仍由
                         # CP-SAT 决定，但不能把同一列拆机切碎给多台 A，
                         # 否则会出现一台机器人沿列移动时跳过中间机器。
+                        model.Add(assigned[(op_id, rid)] == assigned[(anchor_op, rid)])
+
+        if self.config.enforce_same_b_robot_for_column_inspection:
+            columns: dict[int, list[str]] = {}
+            for mid, machine in problem.machines.items():
+                columns.setdefault(machine.cells[0].x, []).append(mid)
+            b_robot_ids = [
+                rid for rid, robot in problem.robots.items()
+                if robot.robot_type == RobotType.B
+            ]
+            for machine_ids in columns.values():
+                if len(machine_ids) < 2:
+                    continue
+                anchor_op = f"{machine_ids[0]}_I"
+                for mid in machine_ids[1:]:
+                    op_id = f"{mid}_I"
+                    for rid in b_robot_ids:
+                        # 检测也作为列级工作包，不允许 B_1/B_2 把同一列
+                        # 切碎，避免“检一半换列再回来”的实际路线。
                         model.Add(assigned[(op_id, rid)] == assigned[(anchor_op, rid)])
 
         if self.config.enforce_top_down_within_column:
@@ -306,6 +345,97 @@ class CpSatScheduler:
 
         unique_columns = sorted({m.cells[0].x for m in problem.machines.values()})
         column_disassembly_complete: dict[int, Any] = {}
+        operation_type_by_column: dict[OperationType, dict[int, list[str]]] = {
+            op_type: {
+                x: [
+                    op_id for op_id in operation_ids
+                    if (
+                        problem.operations[op_id].operation_type == op_type
+                        and problem.machines[problem.operations[op_id].machine_id].cells[0].x == x
+                    )
+                ]
+                for x in unique_columns
+            }
+            for op_type in (
+                OperationType.DISASSEMBLE,
+                OperationType.INSPECT,
+                OperationType.INSTALL,
+            )
+        }
+
+        def column_group_ops(op_type: OperationType, columns: tuple[int, ...]) -> list[str]:
+            ops: list[str] = []
+            for x in columns:
+                ops.extend(operation_type_by_column[op_type].get(x, []))
+            return ops
+
+        def add_wave_order(op_type: OperationType, label: str) -> None:
+            """约束工序状态按列波次从左到右推进，不预先生成机器人队列。"""
+            waves = [
+                tuple(x for x in wave if x in unique_columns)
+                for wave in self.config.column_wave_order
+            ]
+            waves = [wave for wave in waves if wave]
+            for left_wave, right_wave in zip(waves, waves[1:]):
+                left_ops = column_group_ops(op_type, left_wave)
+                right_ops = column_group_ops(op_type, right_wave)
+                if not left_ops or not right_ops:
+                    continue
+                left_complete = model.NewIntVar(
+                    0, horizon,
+                    f"{label}_wave_complete[{','.join(map(str, left_wave))}]",
+                )
+                right_start = model.NewIntVar(
+                    0, horizon,
+                    f"{label}_wave_start[{','.join(map(str, right_wave))}]",
+                )
+                model.AddMaxEquality(left_complete, [end[op_id] for op_id in left_ops])
+                model.AddMinEquality(right_start, [start[op_id] for op_id in right_ops])
+                # 前一个列对的该工序全部完成后，下一个列对才开始该工序。
+                # 注意这不是手工任务顺序；每个波次内部仍由 CP-SAT 的 arc、
+                # 分配和时间变量决定。
+                model.Add(left_complete <= right_start)
+
+        if self.config.column_wave_order:
+            if self.config.enforce_disassembly_column_wave_order:
+                add_wave_order(OperationType.DISASSEMBLE, "disassembly")
+            if self.config.enforce_inspection_column_wave_order:
+                add_wave_order(OperationType.INSPECT, "inspection")
+            if self.config.enforce_install_column_wave_order:
+                add_wave_order(OperationType.INSTALL, "install")
+
+        if (
+            self.config.enforce_inspection_start_follows_preferred_order
+            and self.config.preferred_inspection_column_order
+        ):
+            inspection_start_by_column: dict[int, Any] = {}
+            inspection_finish_by_column: dict[int, Any] = {}
+            for x in self.config.preferred_inspection_column_order:
+                ops = operation_type_by_column[OperationType.INSPECT].get(x, [])
+                if not ops:
+                    continue
+                col_start = model.NewIntVar(0, horizon, f"inspection_column_start[{x}]")
+                col_finish = model.NewIntVar(0, horizon, f"inspection_column_finish[{x}]")
+                model.AddMinEquality(col_start, [start[op_id] for op_id in ops])
+                model.AddMaxEquality(col_finish, [end[op_id] for op_id in ops])
+                inspection_start_by_column[x] = col_start
+                inspection_finish_by_column[x] = col_finish
+            ordered_columns = [
+                x for x in self.config.preferred_inspection_column_order
+                if x in inspection_start_by_column
+            ]
+            for earlier, later in zip(ordered_columns, ordered_columns[1:]):
+                if self.config.enforce_inspection_finish_column_before_next:
+                    model.Add(
+                        inspection_finish_by_column[earlier]
+                        <= inspection_start_by_column[later]
+                    )
+                else:
+                    model.Add(
+                        inspection_start_by_column[earlier]
+                        <= inspection_start_by_column[later]
+                    )
+
         if self.config.enforce_b_inspection_follows_disassembly_completion:
             for x in unique_columns:
                 d_ends = [
@@ -318,6 +448,16 @@ class CpSatScheduler:
                 complete = model.NewIntVar(0, horizon, f"column_disassembly_complete[{x}]")
                 model.AddMaxEquality(complete, d_ends)
                 column_disassembly_complete[x] = complete
+                if self.config.enforce_inspection_after_full_column_disassembly:
+                    for op_id in operation_ids:
+                        op = problem.operations[op_id]
+                        if (
+                            op.operation_type == OperationType.INSPECT
+                            and problem.machines[op.machine_id].cells[0].x == x
+                        ):
+                            # B 必须等整列拆机完成后再进入该列检测；
+                            # 这样不会路过尚未激活/尚未可检的离心机。
+                            model.Add(start[op_id] >= complete)
 
         if self.config.enforce_robot_column_blocks:
             ops_by_column = {
@@ -523,6 +663,25 @@ class CpSatScheduler:
                         # 强化“同一列拆机自下而上连续执行”：如果该 A 机器人
                         # 负责这一列，相邻拆机操作必须在 CP-SAT 序列中直接相连，
                         # 不能在 y=23→19、19→15 等相邻步骤之间插入其他任务。
+                        model.Add(arcs[(rid, lower_op, upper_op)] == 1).OnlyEnforceIf([
+                            assigned[(lower_op, rid)],
+                            assigned[(upper_op, rid)],
+                        ])
+            if self.config.enforce_contiguous_bottom_up_inspection_chain:
+                columns: dict[int, list[str]] = {}
+                for mid, machine in problem.machines.items():
+                    columns.setdefault(machine.cells[0].x, []).append(mid)
+                for machine_ids in columns.values():
+                    by_row_from_bottom = sorted(
+                        machine_ids,
+                        key=lambda mid: problem.machines[mid].row,
+                        reverse=True,
+                    )
+                    for lower, upper in zip(by_row_from_bottom, by_row_from_bottom[1:]):
+                        lower_op = f"{lower}_I"
+                        upper_op = f"{upper}_I"
+                        if lower_op not in ops or upper_op not in ops:
+                            continue
                         model.Add(arcs[(rid, lower_op, upper_op)] == 1).OnlyEnforceIf([
                             assigned[(lower_op, rid)],
                             assigned[(upper_op, rid)],

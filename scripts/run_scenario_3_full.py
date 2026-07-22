@@ -1,10 +1,10 @@
-"""场景2（2A+1B）手工分区流水线完整运行与输出。"""
+"""场景3（4A+2B）完整 CP-SAT 调度、仿真与输出。"""
 from __future__ import annotations
 
 import json
-import subprocess
 import os
 import re
+import subprocess
 import sys
 import time
 from pathlib import Path
@@ -14,6 +14,7 @@ sys.path.insert(0, str(PROJECT))
 
 from src.domain.enums import RobotType
 from src.domain.models import Cell, Footprint, RobotSpec
+from src.domain.validation import FootprintValidator
 from src.evaluation.metrics import MetricsCalculator
 from src.map.fixed_map import FixedMap
 from src.simulation.engine import SimulationEngine
@@ -60,7 +61,7 @@ def summarize_wait_and_yield(event_log: list[dict], robot_ids: list[str]) -> dic
             start = open_yield.pop(rid, t)
             wait_by_robot[rid]["yield_time"] += max(0, t - start)
 
-    for rid, values in wait_by_robot.items():
+    for values in wait_by_robot.values():
         values["total_wait_without_yield"] = (
             values["scheduled_path_wait"]
             + values["precedence_wait"]
@@ -92,14 +93,7 @@ def summarize_wait_and_yield(event_log: list[dict], robot_ids: list[str]) -> dic
 def calculate_robot_time_accounting(
     event_log: list[dict], robot_ids: list[str]
 ) -> dict:
-    """按互斥时间口径统计工作、运动、避让和等待时间。
-
-    定义：
-    - total_time = waiting_time + working_time
-    - working_time = service_time + movement_time
-    - movement_time = normal_movement_time + avoidance_time
-    - avoidance_time 是执行避让路径时实际发生位置变化的时间
-    """
+    """按互斥时间口径统计工作、运动、避让和等待时间。"""
     move_re = re.compile(r"^([AB]_\d+): -> \(([-\d]+),([-\d]+)\) t=(\d+) (\S+)")
     rid_re = re.compile(r"^([AB]_\d+):")
 
@@ -188,7 +182,7 @@ def calculate_robot_time_accounting(
             else:
                 detail["other_wait_time"] += 1
 
-    for rid, values in data.items():
+    for values in data.values():
         if values["finish_time"] <= 0:
             values["finish_time"] = last_event_t
         values["movement_time"] = (
@@ -244,17 +238,13 @@ def calculate_robot_time_accounting(
 
     return {
         "definitions": {
-            "total_time": "waiting_time + working_time; counted per robot until robot_finished",
+            "total_time": "waiting_time + working_time; counted per robot until global makespan",
             "working_time": "service_time + movement_time",
-            "service_time": "time spent executing centrifuge operations, counted from work_tick events",
+            "service_time": "time spent executing centrifuge operations",
             "movement_time": "normal_movement_time + avoidance_time",
             "normal_movement_time": "position-changing move events outside yield paths",
             "avoidance_time": "position-changing move events while executing a yield path",
-            "waiting_time": (
-                "stationary non-service/non-movement time before robot_finished; "
-                "plus post_completion_wait_time until global makespan; "
-                "activation waits are listed separately in waiting_detail"
-            ),
+            "waiting_time": "stationary non-service/non-movement time plus post-completion wait",
             "post_completion_wait_time": (
                 "time after this robot returned/finished until the whole scenario ended"
             ),
@@ -264,10 +254,87 @@ def calculate_robot_time_accounting(
     }
 
 
+def audit_trajectory_collisions(event_log: list[dict], robot_ids: list[str]) -> dict:
+    """对最终轨迹做 footprint 和 swept collision 复核。"""
+    move_re = re.compile(r"^([AB]_\d+): -> \(([-\d]+),([-\d]+)\) t=(\d+) (\S+)")
+    footprint = Footprint.default_2x4()
+    raw: dict[int, dict[str, Cell]] = {}
+    end_t = max((int(event.get("t", 0)) for event in event_log), default=0)
+    for event in event_log:
+        if event.get("type") != "move":
+            continue
+        match = move_re.match(event.get("message", ""))
+        if not match:
+            continue
+        rid, x, y, t, _ = match.groups()
+        raw.setdefault(int(t), {})[rid] = Cell(int(x), int(y))
+
+    last: dict[str, Cell] = {}
+    positions: dict[int, dict[str, Cell]] = {}
+    for t in range(end_t + 1):
+        if t in raw:
+            last.update(raw[t])
+        positions[t] = {rid: last[rid] for rid in robot_ids if rid in last}
+
+    pose_collisions = []
+    swept_conflicts = []
+    for t in range(end_t + 1):
+        ids = sorted(positions[t])
+        for i, rid_a in enumerate(ids):
+            cells_a = footprint.cells_at(positions[t][rid_a])
+            for rid_b in ids[i + 1:]:
+                overlap = cells_a & footprint.cells_at(positions[t][rid_b])
+                if overlap:
+                    pose_collisions.append({
+                        "t": t,
+                        "robots": [rid_a, rid_b],
+                        "anchors": {
+                            rid_a: [positions[t][rid_a].x, positions[t][rid_a].y],
+                            rid_b: [positions[t][rid_b].x, positions[t][rid_b].y],
+                        },
+                        "overlap_cells": sorted([cell.x, cell.y] for cell in overlap),
+                    })
+
+    for t in range(1, end_t + 1):
+        ids = sorted(set(positions[t - 1]) & set(positions[t]))
+        sweeps = {
+            rid: FootprintValidator.swept_cells(
+                positions[t - 1][rid], positions[t][rid], footprint
+            )
+            for rid in ids
+        }
+        for i, rid_a in enumerate(ids):
+            for rid_b in ids[i + 1:]:
+                overlap = sweeps[rid_a] & sweeps[rid_b]
+                if overlap:
+                    swept_conflicts.append({
+                        "t_interval": [t - 1, t],
+                        "robots": [rid_a, rid_b],
+                        "from_to": {
+                            rid_a: [
+                                [positions[t - 1][rid_a].x, positions[t - 1][rid_a].y],
+                                [positions[t][rid_a].x, positions[t][rid_a].y],
+                            ],
+                            rid_b: [
+                                [positions[t - 1][rid_b].x, positions[t - 1][rid_b].y],
+                                [positions[t][rid_b].x, positions[t][rid_b].y],
+                            ],
+                        },
+                        "overlap_cells": sorted([cell.x, cell.y] for cell in overlap),
+                    })
+
+    return {
+        "pose_collision_count": len(pose_collisions),
+        "swept_conflict_count": len(swept_conflicts),
+        "collision_free": not pose_collisions and not swept_conflicts,
+        "pose_collisions": pose_collisions[:100],
+        "swept_conflicts": swept_conflicts[:100],
+    }
+
+
 def inspection_column_order(schedule, machines, operations) -> tuple[int, ...]:
-    """从 CP-SAT 结果中提取 B 机器人首次检测各列的顺序。"""
-    order: list[int] = []
-    seen: set[int] = set()
+    """按所有 B 机器人计划检测启动时间合并提取首次检测列顺序。"""
+    candidates: list[tuple[int, int, str]] = []
     for rid, robot_schedule in schedule.robot_schedules.items():
         if not rid.startswith("B"):
             continue
@@ -277,15 +344,22 @@ def inspection_column_order(schedule, machines, operations) -> tuple[int, ...]:
             if op.operation_type.value != "INSPECT":
                 continue
             x = machines[op.machine_id].cells[0].x
-            if x not in seen:
-                seen.add(x)
-                order.append(x)
+            planned_start = int(detail.get("planned_start_time", 0))
+            candidates.append((planned_start, x, op_id))
+
+    order: list[int] = []
+    seen: set[int] = set()
+    for _, x, _ in sorted(candidates):
+        if x in seen:
+            continue
+        seen.add(x)
+        order.append(x)
     return tuple(order)
 
 
 def main() -> None:
-    experiment = sys.argv[1] if len(sys.argv) > 1 else "260703_test11"
-    output = PROJECT / "outputs" / "scenario_2" / experiment
+    experiment = sys.argv[1] if len(sys.argv) > 1 else "test0"
+    output = PROJECT / "outputs" / "scenario_3" / experiment
     output.mkdir(parents=True, exist_ok=True)
 
     started = time.perf_counter()
@@ -293,97 +367,52 @@ def main() -> None:
     footprint = Footprint.default_2x4()
     robots = {
         "A_1": RobotSpec("A_1", RobotType.A, Cell(1, 28), footprint),
-        "A_2": RobotSpec("A_2", RobotType.A, Cell(12, 28), footprint),
-        "B_1": RobotSpec("B_1", RobotType.B, Cell(24, 28), footprint),
+        "A_2": RobotSpec("A_2", RobotType.A, Cell(5, 28), footprint),
+        "A_3": RobotSpec("A_3", RobotType.A, Cell(9, 28), footprint),
+        "A_4": RobotSpec("A_4", RobotType.A, Cell(13, 28), footprint),
+        "B_1": RobotSpec("B_1", RobotType.B, Cell(17, 28), footprint),
+        "B_2": RobotSpec("B_2", RobotType.B, Cell(21, 28), footprint),
     }
-    left_to_right_wave_experiments = {"test13", "test18"}
-    enforce_column_blocks = experiment in {
-        "test7", "test8", "test9", "test10", "test11", "test12", "test13",
-        "test17", "test18",
-    }
-    enforce_disassembly_priority = experiment in {
-        "test8", "test9", "test10", "test11", "test12", "test13", "test17",
-        "test18",
-    }
-    enforce_b_follow_disassembly = experiment in {
-        "test10", "test11", "test12", "test13", "test17", "test18",
-    }
-    minimize_initial_wait = experiment in {"test12", "test13", "test17", "test18"}
-    allow_early_service_start = experiment in {"test12", "test13", "test17", "test18"}
-    enforce_left_to_right_waves = experiment in left_to_right_wave_experiments
-    cp_time_budget = 20 if experiment == "test17" else 60
-    column_wave_order = ((2, 5), (8, 11), (14, 17), (20, 23)) if enforce_left_to_right_waves else ()
-    preferred_inspection_order = (5, 2, 8, 11, 14, 17, 20, 23) if enforce_left_to_right_waves else ()
-    preferred_a_column_order = (2, 5, 8, 11, 14, 17, 20, 23) if experiment == "test18" else ()
-    install_order: tuple[int, ...] = ()
-    if experiment == "test17":
-        # test17 keeps the test12 CP-SAT constraint set and installation order.
-        # The only accepted improvement is from the lighter runtime avoidance
-        # behavior; probe run: test12 order -> sim 1094 (< original 1104).
-        install_order = (11, 2, 5, 8, 14, 23, 20, 17)
-    elif experiment == "test18":
-        # User-specified intuitive pipeline:
-        # A_1/A_2 process physical columns 1/2, 3/4, 5/6, 7/8 in pairs;
-        # B inspects physical column 2 first, then 1,3,4,5,6,7,8.
-        install_order = preferred_a_column_order
-    elif experiment in {"test11", "test12", "test13"}:
-        base_schedule = solve_assignment_schedule(
-            terrain, machines, operations, robots,
-            SolverConfig(
-                max_time_seconds=cp_time_budget,
-                allow_fallback=False,
-                enforce_robot_column_blocks=enforce_column_blocks,
-                column_blocks_by_operation_type=enforce_disassembly_priority,
-                enforce_a_disassembly_priority=enforce_disassembly_priority,
-                enforce_b_inspection_follows_disassembly_completion=True,
-                disable_runtime_b_inspection_reorder=experiment == "test18",
-                enforce_inspection_after_full_column_disassembly=enforce_left_to_right_waves,
-                enforce_contiguous_bottom_up_inspection_chain=enforce_left_to_right_waves,
-                column_wave_order=column_wave_order,
-                enforce_disassembly_column_wave_order=enforce_left_to_right_waves,
-                enforce_inspection_column_wave_order=enforce_left_to_right_waves,
-                preferred_inspection_column_order=preferred_inspection_order,
-                enforce_inspection_start_follows_preferred_order=enforce_left_to_right_waves,
-                enforce_inspection_finish_column_before_next=enforce_left_to_right_waves,
-                preferred_disassembly_column_order=preferred_a_column_order,
-                enforce_alternating_disassembly_by_preferred_order=bool(preferred_a_column_order),
-                minimize_initial_start_wait=minimize_initial_wait,
-            ),
-        )
-        install_order = inspection_column_order(base_schedule, machines, operations)
 
+    base_config = dict(
+        max_time_seconds=60,
+        allow_fallback=False,
+        enforce_robot_column_blocks=True,
+        column_blocks_by_operation_type=True,
+        enforce_a_disassembly_priority=True,
+        enforce_b_inspection_follows_disassembly_completion=True,
+        enforce_same_b_robot_for_column_inspection=True,
+        enforce_inspection_after_full_column_disassembly=True,
+        enforce_contiguous_bottom_up_inspection_chain=True,
+        minimize_initial_start_wait=True,
+    )
+    print("[scenario_3] solving base CP-SAT schedule...", flush=True)
+    base_schedule = solve_assignment_schedule(
+        terrain, machines, operations, robots, SolverConfig(**base_config)
+    )
+    install_order = inspection_column_order(base_schedule, machines, operations)
+
+    print(f"[scenario_3] solving final CP-SAT schedule, install_order={install_order}...", flush=True)
     schedule = solve_assignment_schedule(
-        terrain, machines, operations, robots,
+        terrain,
+        machines,
+        operations,
+        robots,
         SolverConfig(
-            max_time_seconds=cp_time_budget,
-            allow_fallback=False,
-            enforce_robot_column_blocks=enforce_column_blocks,
-            column_blocks_by_operation_type=enforce_disassembly_priority,
-            enforce_a_disassembly_priority=enforce_disassembly_priority,
-            enforce_b_inspection_follows_disassembly_completion=enforce_b_follow_disassembly,
-            disable_runtime_b_inspection_reorder=experiment == "test18",
-            enforce_inspection_after_full_column_disassembly=enforce_left_to_right_waves,
-            enforce_contiguous_bottom_up_inspection_chain=enforce_left_to_right_waves,
-            column_wave_order=column_wave_order,
-            enforce_disassembly_column_wave_order=enforce_left_to_right_waves,
-            enforce_inspection_column_wave_order=enforce_left_to_right_waves,
-            enforce_install_column_wave_order=enforce_left_to_right_waves,
-            preferred_inspection_column_order=preferred_inspection_order,
-            enforce_inspection_start_follows_preferred_order=enforce_left_to_right_waves,
-            enforce_inspection_finish_column_before_next=enforce_left_to_right_waves,
-            preferred_disassembly_column_order=preferred_a_column_order,
-            enforce_alternating_disassembly_by_preferred_order=bool(preferred_a_column_order),
+            **base_config,
             preferred_install_column_order=install_order,
             enforce_install_start_follows_preferred_order=bool(install_order),
             enforce_alternating_install_by_preferred_order=bool(install_order),
-            minimize_initial_start_wait=minimize_initial_wait,
-            allow_early_service_start=allow_early_service_start,
+            allow_early_service_start=True,
         ),
     )
 
     engine = SimulationEngine()
     engine.setup(terrain, machines, operations, robots, schedule)
-    engine.run(max_steps=60000)
+    engine.progress_interval = int(os.environ.get("MRS_PROGRESS_INTERVAL", "0"))
+    print("[scenario_3] running simulation...", flush=True)
+    max_steps = int(os.environ.get("MRS_MAX_STEPS", "60000"))
+    engine.run(max_steps=max_steps)
     timing = {
         "simulation": time.perf_counter() - started,
         "total_wall": time.perf_counter() - started,
@@ -393,12 +422,12 @@ def main() -> None:
         engine.current_time, timing,
     )
     machine_summary = engine.state_machine.summary()
-    robot_time_accounting = calculate_robot_time_accounting(
-        engine.event_log, sorted(robots.keys())
-    )
+    robot_ids = sorted(robots.keys())
+    robot_time_accounting = calculate_robot_time_accounting(engine.event_log, robot_ids)
+    collision_audit = audit_trajectory_collisions(engine.event_log, robot_ids)
 
     data = {
-        "scenario": "2A1B",
+        "scenario": "4A2B",
         "makespan": metrics.makespan,
         "path_length": {
             "total": metrics.total_path_length,
@@ -410,11 +439,18 @@ def main() -> None:
             "by_robot": metrics.wait_by_robot,
         },
         "runtime_wait_yield_analysis": summarize_wait_and_yield(
-            engine.event_log, sorted(robots.keys())
+            engine.event_log, robot_ids
         ),
         "robot_time_accounting": robot_time_accounting,
+        "trajectory_collision_audit": {
+            "pose_collision_count": collision_audit["pose_collision_count"],
+            "swept_conflict_count": collision_audit["swept_conflict_count"],
+            "collision_free": collision_audit["collision_free"],
+        },
         "collisions_violations": {
             "collisions": metrics.collision_count,
+            "pose_collisions_audited": collision_audit["pose_collision_count"],
+            "swept_conflicts_audited": collision_audit["swept_conflict_count"],
             "constraint_violations": metrics.constraint_violation_count,
             "precedence_violations": metrics.precedence_violation_count,
         },
@@ -424,28 +460,18 @@ def main() -> None:
             "solver_mode": schedule.solver_mode,
             "solver_status": schedule.solver_status,
             "sequence_source": schedule.operation_sequence_source,
-            "cp_time_budget": cp_time_budget,
-            "enforce_robot_column_blocks": enforce_column_blocks,
-            "column_blocks_by_operation_type": enforce_disassembly_priority,
-            "enforce_a_disassembly_priority": enforce_disassembly_priority,
-            "enforce_b_inspection_follows_disassembly_completion": enforce_b_follow_disassembly,
-            "disable_runtime_b_inspection_reorder": experiment == "test18",
-            "column_wave_order": [list(wave) for wave in column_wave_order],
-            "enforce_disassembly_column_wave_order": enforce_left_to_right_waves,
-            "enforce_inspection_column_wave_order": enforce_left_to_right_waves,
-            "enforce_install_column_wave_order": enforce_left_to_right_waves,
-            "preferred_inspection_column_order": list(preferred_inspection_order),
-            "enforce_inspection_start_follows_preferred_order": enforce_left_to_right_waves,
-            "enforce_inspection_finish_column_before_next": enforce_left_to_right_waves,
-            "enforce_inspection_after_full_column_disassembly": enforce_left_to_right_waves,
-            "enforce_contiguous_bottom_up_inspection_chain": enforce_left_to_right_waves,
-            "preferred_disassembly_column_order": list(preferred_a_column_order),
-            "enforce_alternating_disassembly_by_preferred_order": bool(preferred_a_column_order),
+            "enforce_robot_column_blocks": True,
+            "column_blocks_by_operation_type": True,
+            "enforce_a_disassembly_priority": True,
+            "enforce_b_inspection_follows_disassembly_completion": True,
+            "enforce_same_b_robot_for_column_inspection": True,
+            "enforce_inspection_after_full_column_disassembly": True,
+            "enforce_contiguous_bottom_up_inspection_chain": True,
             "preferred_install_column_order": list(install_order),
             "enforce_install_start_follows_preferred_order": bool(install_order),
             "enforce_alternating_install_by_preferred_order": bool(install_order),
-            "minimize_initial_start_wait": minimize_initial_wait,
-            "allow_early_service_start": allow_early_service_start,
+            "minimize_initial_start_wait": True,
+            "allow_early_service_start": True,
         },
         "machine_completion": machine_summary,
         "timing": timing,
@@ -456,19 +482,25 @@ def main() -> None:
     (output / "robot_time_accounting.json").write_text(
         json.dumps(robot_time_accounting, indent=2, ensure_ascii=False)
     )
+    (output / "collision_audit.json").write_text(
+        json.dumps(collision_audit, indent=2, ensure_ascii=False)
+    )
     with (output / "event_log.jsonl").open("w") as file:
         for event in engine.event_log:
             file.write(json.dumps(event, ensure_ascii=False) + "\n")
-    render_python = os.environ.get("MRS_RENDER_PYTHON", "/opt/anaconda3/bin/python")
-    if not Path(render_python).exists():
-        render_python = sys.executable
-    subprocess.run([
-        render_python,
-        str(PROJECT / "scripts" / "render_scenario_outputs.py"),
-        experiment,
-        "Scenario 2 (2A1B CP-SAT)",
-        "scenario_2",
-    ], check=True)
+
+    if os.environ.get("MRS_SKIP_RENDER") != "1":
+        print("[scenario_3] rendering plots...", flush=True)
+        render_python = os.environ.get("MRS_RENDER_PYTHON", "/opt/anaconda3/bin/python")
+        if not Path(render_python).exists():
+            render_python = sys.executable
+        subprocess.run([
+            render_python,
+            str(PROJECT / "scripts" / "render_scenario_outputs.py"),
+            experiment,
+            "Scenario 3 (4A2B CP-SAT)",
+            "scenario_3",
+        ], check=True)
 
     completed_ops = sum(len(robot.completed_ops) for robot in engine.robots.values())
     print(json.dumps({
@@ -477,6 +509,8 @@ def main() -> None:
         "completed_machines": machine_summary.get("COMPLETED", 0),
         "completed_operations": completed_ops,
         "collisions": metrics.collision_count,
+        "pose_collisions_audited": collision_audit["pose_collision_count"],
+        "swept_conflicts_audited": collision_audit["swept_conflict_count"],
         "violations": metrics.constraint_violation_count,
         "replans": metrics.number_of_replans,
     }, indent=2, ensure_ascii=False))

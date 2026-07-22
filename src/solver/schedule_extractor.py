@@ -37,6 +37,43 @@ def extract_cp_sat_schedule(problem, config, solver, status, artifacts) -> Sched
         "enforce_b_inspection_follows_disassembly_completion": (
             config.enforce_b_inspection_follows_disassembly_completion
         ),
+        "disable_runtime_b_inspection_reorder": (
+            config.disable_runtime_b_inspection_reorder
+        ),
+        "column_wave_order": [list(wave) for wave in config.column_wave_order],
+        "enforce_disassembly_column_wave_order": (
+            config.enforce_disassembly_column_wave_order
+        ),
+        "enforce_inspection_column_wave_order": (
+            config.enforce_inspection_column_wave_order
+        ),
+        "enforce_install_column_wave_order": (
+            config.enforce_install_column_wave_order
+        ),
+        "preferred_inspection_column_order": list(
+            config.preferred_inspection_column_order
+        ),
+        "enforce_inspection_start_follows_preferred_order": (
+            config.enforce_inspection_start_follows_preferred_order
+        ),
+        "enforce_inspection_finish_column_before_next": (
+            config.enforce_inspection_finish_column_before_next
+        ),
+        "preferred_disassembly_column_order": list(
+            config.preferred_disassembly_column_order
+        ),
+        "enforce_alternating_disassembly_by_preferred_order": (
+            config.enforce_alternating_disassembly_by_preferred_order
+        ),
+        "enforce_same_b_robot_for_column_inspection": (
+            config.enforce_same_b_robot_for_column_inspection
+        ),
+        "enforce_inspection_after_full_column_disassembly": (
+            config.enforce_inspection_after_full_column_disassembly
+        ),
+        "enforce_contiguous_bottom_up_inspection_chain": (
+            config.enforce_contiguous_bottom_up_inspection_chain
+        ),
         "preferred_install_column_order": list(config.preferred_install_column_order),
         "enforce_install_start_follows_preferred_order": (
             config.enforce_install_start_follows_preferred_order
@@ -46,6 +83,8 @@ def extract_cp_sat_schedule(problem, config, solver, status, artifacts) -> Sched
         ),
         "minimize_initial_start_wait": config.minimize_initial_start_wait,
         "allow_early_service_start": config.allow_early_service_start,
+        "random_seed": config.random_seed,
+        "num_search_workers": config.num_search_workers,
     }
     result.objective = dict(result.solver_objective)
 

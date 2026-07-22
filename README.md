@@ -228,6 +228,67 @@ python scripts/create_animation_fast.py test12 scenario_2 10 24
 outputs/scenario_2/test12/animation_smooth.mp4
 ```
 
+### scenario2 / v2.4：CP-SAT 固定流水线列顺序 + test18
+
+当前 v2.4 对应推荐结果为 `scenario_2/test18`。
+
+运行入口：
+
+```bash
+python scripts/run_scenario_2_full.py test18
+```
+
+结果目录：
+
+```text
+outputs/scenario_2/test18/
+```
+
+v2.4 的核心变化是把 2A1B 场景中更符合人工直觉、且经完整仿真验证更快的
+流水线节拍显式纳入 CP-SAT 约束，而不是让仿真器在运行期手工重排任务。
+
+新增/强化的求解器约束包括：
+
+- A 机拆机列顺序：第 `1/2 → 3/4 → 5/6 → 7/8` 列。实际地图 x 坐标为
+  `[2, 5, 8, 11, 14, 17, 20, 23]`。
+- `enforce_alternating_disassembly_by_preferred_order=True` 时，CP-SAT 在
+  `assigned[o,r]` 变量层面把上述拆机列交替分给 A_1 / A_2。
+- B 机检测列顺序：第 `2 → 1 → 3 → 4 → 5 → 6 → 7 → 8` 列。实际地图
+  x 坐标为 `[5, 2, 8, 11, 14, 17, 20, 23]`。
+- A 机安装列顺序：第 `1/2 → 3/4 → 5/6 → 7/8` 列，并按该列序交替分给
+  A_1 / A_2。
+- `disable_runtime_b_inspection_reorder=True` 时，仿真器不会再根据“实际哪一列
+  更早拆完”重排 B 的检测队列。路径层仍可等待、避让和局部重规划，但不得改变
+  CP-SAT 输出的高层任务顺序。
+
+路径规划职责保持不变：CP-SAT 负责任务分配、列顺序、操作顺序、计划时间和静态
+旅行时间约束；Space-Time A* 负责逐时间步路径、2 × 4 本体、预约表、扫掠碰撞、
+动态等待、局部避让和必要重规划。
+
+当前 `test18` 验证结果：
+
+- makespan：1027；
+- 完成机器：48 / 48；
+- 完成操作：144 / 144；
+- 碰撞：0；
+- 约束违规：0；
+- replans：3；
+- A_1 作业时间：288；
+- A_2 作业时间：288；
+- B_1 作业时间：480。
+
+生成动画：
+
+```bash
+python scripts/create_animation_fast.py test18 scenario_2 10 24
+```
+
+生成的视频为：
+
+```text
+outputs/scenario_2/test18/animation_smooth.mp4
+```
+
 ## 核心功能
 
 - 2 × 4 footprint 姿态、转移及扫掠区域碰撞验证
@@ -321,24 +382,26 @@ outputs/scenario_1/cp_sat_current_video/animation_smooth.mp4
 说明任务顺序来自 CP-SAT 求解器，而不是 row-major、column-major 或其他
 手工排序代码。
 
-## 2A1B 场景 test8 / test12 代码使用说明
+## 2A1B 场景 test8 / test12 / test18 代码使用说明
 
-`scenario_2/test8` 是 v2.2 的列块约束版本；`scenario_2/test12` 是当前
-v2.3 推荐版本，在 test8/test11 的基础上继续优化等待时间和避让时间。
-二者都表示 2 台 A 类机器人和 1 台 B 类机器人协同完成同一批 48 台离心机的
-拆卸、检测和安装。当前建议优先运行 `test12`。
+`scenario_2/test8` 是 v2.2 的列块约束版本；`scenario_2/test12` 是 v2.3
+等待/避让时间优化基线；`scenario_2/test18` 是当前 v2.4 推荐版本，在 test12
+的基础上加入固定流水线列顺序，并禁止仿真器运行期重排 B 的检测队列。
 
-### 运行 2A1B test12
+三者都表示 2 台 A 类机器人和 1 台 B 类机器人协同完成同一批 48 台离心机的
+拆卸、检测和安装。当前建议优先运行 `test18`。
+
+### 运行 2A1B test18
 
 ```bash
 source .venv/bin/activate
-python scripts/run_scenario_2_full.py test12
+python scripts/run_scenario_2_full.py test18
 ```
 
 运行后结果会写入：
 
 ```text
-outputs/scenario_2/test12/
+outputs/scenario_2/test18/
 ```
 
 主要输出文件包括：
@@ -350,24 +413,25 @@ outputs/scenario_2/test12/
 - `trajectories.png`：三台机器人轨迹图；
 - `trajectories.json`：动画和轨迹分析使用的原始轨迹数据。
 
-### 生成 2A1B test12 动画
+### 生成 2A1B test18 动画
 
 ```bash
-python scripts/create_animation_fast.py test12 scenario_2 10 24
+python scripts/create_animation_fast.py test18 scenario_2 10 24
 ```
 
 生成的视频为：
 
 ```text
-outputs/scenario_2/test12/animation_smooth.mp4
+outputs/scenario_2/test18/animation_smooth.mp4
 ```
 
-### scenario_2/test12 由哪些代码生成
+### scenario_2/test18 由哪些代码生成
 
-`scenario_2/test12` 的主要调用链如下：
+`scenario_2/test18` 的主要调用链如下：
 
 1. [scripts/run_scenario_2_full.py](scripts/run_scenario_2_full.py)  
-   创建 2A1B 场景、调用正式求解器、运行仿真、保存指标和事件日志。
+   创建 2A1B 场景、配置 v2.4 流水线列顺序、调用正式求解器、运行仿真、
+   保存指标和事件日志。
 
 2. [src/solver/scheduler.py](src/solver/scheduler.py)  
    正式求解入口，调用 `solve_assignment_schedule(...)`。默认
@@ -386,8 +450,8 @@ outputs/scenario_2/test12/animation_smooth.mp4
 
 6. [src/simulation/engine.py](src/simulation/engine.py)  
    按 CP-SAT 给出的操作顺序执行仿真；Space-Time A* 负责逐时间步路径、
-   2 × 4 本体避碰、预约表、动态等待、按需让行和局部重规划。仿真器不重新
-   决定任务顺序。
+   2 × 4 本体避碰、预约表、动态等待、按需让行和局部重规划。test18 中
+   `disable_runtime_b_inspection_reorder=True`，因此仿真器不会再重排 B 的检测队列。
 
 7. [scripts/render_scenario_outputs.py](scripts/render_scenario_outputs.py)  
    根据事件日志生成甘特图、轨迹图和轨迹 JSON。
@@ -398,19 +462,20 @@ outputs/scenario_2/test12/animation_smooth.mp4
 ### 任务分配和列顺序策略
 
 2A1B 正式模式下，任务分配和执行顺序由 CP-SAT 求解器决定，不再由手工代码
-写死。当前 v2.2 约束强调“列块执行 + 拆机优先 + 并行工作”：
+写死。当前 v2.4 约束强调“固定流水线列顺序 + 列块执行 + 拆机优先 + 并行工作”：
 
 - 同一列的 `DISASSEMBLE` 操作作为列级工作包，由同一台 A 机器人负责；
 - 同一列拆机按从主干道进入更自然的自下而上顺序执行；
 - 每台机器人必须完成自己在某一列承担的任务后，才能进入下一列；
 - A 机在仍有未拆列时优先执行拆机任务，不提前进入安装阶段；
+- A 机拆机和安装按照第 `1/2 → 3/4 → 5/6 → 7/8` 列推进；
+- B 机检测按照第 `2 → 1 → 3 → 4 → 5 → 6 → 7 → 8` 列推进；
+- test18 禁止运行期按实际拆机完成时间重排 B 检测队列；
 - A_1、A_2、B_1 的作业可在不同列、不同工序之间形成流水线并行；
 - 路径层允许多机器人同时移动，由时空预约表和 safety guard 保证零碰撞。
 
-也就是说，v2.3 会限制机器人不要在列块之间来回穿插；但列块分配、列块先后顺序、
-检测/安装衔接和并行时机仍由 CP-SAT 与路径规划共同执行。相比 v2.2，v2.3
-进一步减少了 planned start 带来的不必要等待，并在指标文件中显式统计每台机器人的
-等待时间与避让时间。
+也就是说，v2.4 的列顺序是作为 CP-SAT 约束进入模型的；路径规划器只解决
+逐时间步避碰、等待和局部重规划，不再改变高层任务顺序。
 
 ## 快速开始
 

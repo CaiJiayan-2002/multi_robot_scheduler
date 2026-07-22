@@ -128,8 +128,10 @@ class SimulationEngine:
         # 规划组件
         self.reservation_table: ReservationTable = ReservationTable()
         self.pose_graph: PoseGraph | None = None
+        self.yield_pose_graph: PoseGraph | None = None
         self.static_astar: StaticAStar | None = None
         self.space_time_astar: SpaceTimeAStar | None = None
+        self.yield_space_time_astar: SpaceTimeAStar | None = None
         self.service_anchors: dict[str, Cell] = {}
 
         # 事件日志
@@ -137,6 +139,8 @@ class SimulationEngine:
         self.planning_conflicts: list[PlanningConflict] = []
         self.enforce_a_disassembly_priority: bool = False
         self.enforce_b_inspection_follows_disassembly_completion: bool = False
+        self.disable_runtime_b_inspection_reorder: bool = False
+        self.enforce_same_b_robot_for_column_inspection: bool = False
         self.enforce_install_follows_inspection_order: bool = False
         self.allow_early_service_start: bool = False
         self.column_disassembly_completed_at: dict[int, int] = {}
@@ -186,11 +190,18 @@ class SimulationEngine:
         # 构建姿态图
         self.pose_graph = PoseGraph(terrain, self.footprint)
         self.pose_graph.build()
+        # 避让专用姿态图：允许在内部无障碍通道横向短移。正式任务路径
+        # 仍使用 pose_graph，因此不会改变“作业换列走主干道”的规则。
+        self.yield_pose_graph = PoseGraph(terrain, self.footprint, trunk_y_threshold=1)
+        self.yield_pose_graph.build()
 
         # 构建规划器
         self.static_astar = StaticAStar(self.pose_graph)
         self.space_time_astar = SpaceTimeAStar(
             self.pose_graph, self.reservation_table, self.footprint
+        )
+        self.yield_space_time_astar = SpaceTimeAStar(
+            self.yield_pose_graph, self.reservation_table, self.footprint
         )
 
         # 计算服务锚点
@@ -217,6 +228,14 @@ class SimulationEngine:
         self.enforce_b_inspection_follows_disassembly_completion = bool(
             getattr(schedule, "solver_objective", {})
             .get("enforce_b_inspection_follows_disassembly_completion", False)
+        )
+        self.disable_runtime_b_inspection_reorder = bool(
+            getattr(schedule, "solver_objective", {})
+            .get("disable_runtime_b_inspection_reorder", False)
+        )
+        self.enforce_same_b_robot_for_column_inspection = bool(
+            getattr(schedule, "solver_objective", {})
+            .get("enforce_same_b_robot_for_column_inspection", False)
         )
         self.enforce_install_follows_inspection_order = bool(
             getattr(schedule, "solver_objective", {})
@@ -358,7 +377,13 @@ class SimulationEngine:
         self._running = True
         step_count = 0
 
+        progress_interval = getattr(self, "progress_interval", 0)
         while self._running and step_count < max_steps:
+            if progress_interval and step_count and step_count % progress_interval == 0:
+                print(
+                    f"[simulation] step={step_count}, current_time={self.current_time}",
+                    flush=True,
+                )
             self.step()
             step_count += 1
 
@@ -375,8 +400,10 @@ class SimulationEngine:
             碰撞描述列表（空列表 = 无碰撞）
         """
         collisions: list[str] = []
-        robot_list = [(rid, r) for rid, r in self.robots.items()
-                      if r.current_anchor is not None and not r.finished]
+        robot_list = [
+            (rid, r) for rid, r in self.robots.items()
+            if r.current_anchor is not None
+        ]
 
         for i in range(len(robot_list)):
             rid_a, robot_a = robot_list[i]
@@ -411,6 +438,31 @@ class SimulationEngine:
         next_op = self.operations.get(robot.assigned_ops[0])
         if next_op is None or next_op.operation_type != OperationType.INSPECT:
             return
+        current_x = self.machines[next_op.machine_id].cells[0].x
+        if self.enforce_same_b_robot_for_column_inspection:
+            same_column_ready_ops = [
+                op_id for op_id in robot.assigned_ops
+                if (
+                    self.operations[op_id].operation_type == OperationType.INSPECT
+                    and self.machines[self.operations[op_id].machine_id].cells[0].x == current_x
+                    and self.state_machine.can_start_operation(
+                        self.operations[op_id].machine_id,
+                        OperationType.INSPECT,
+                        robot.spec.robot_id,
+                    )[0]
+                )
+            ]
+            if same_column_ready_ops:
+                same_column_ops = [
+                    op_id for op_id in robot.assigned_ops
+                    if self.machines[self.operations[op_id].machine_id].cells[0].x == current_x
+                ]
+                remaining_ops = [
+                    op_id for op_id in robot.assigned_ops
+                    if op_id not in same_column_ops
+                ]
+                robot.assigned_ops = same_column_ops + remaining_ops
+                return
 
         ready_columns: list[tuple[int, int]] = []
         seen_columns: set[int] = set()
@@ -440,7 +492,6 @@ class SimulationEngine:
         if not ready_columns:
             return
         _, chosen_x = min(ready_columns)
-        current_x = self.machines[next_op.machine_id].cells[0].x
         if chosen_x == current_x:
             return
 
@@ -635,7 +686,10 @@ class SimulationEngine:
                     pass
                 continue
 
-            if self.enforce_b_inspection_follows_disassembly_completion:
+            if (
+                self.enforce_b_inspection_follows_disassembly_completion
+                and not self.disable_runtime_b_inspection_reorder
+            ):
                 self._prioritize_b_inspection_queue(robot)
             if self.enforce_install_follows_inspection_order:
                 self._prioritize_a_install_queue(rid, robot)
@@ -659,6 +713,7 @@ class SimulationEngine:
                         "wait_precedence",
                         f"{rid}: install column x={install_x} waits for full-column inspection completion",
                     )
+                    robot.status = RobotStatus.WAITING_PRECEDENCE
                     continue
 
                 a_ids = sorted(
@@ -681,6 +736,7 @@ class SimulationEngine:
                             f"{rid}: install column x={install_x} assigned to "
                             f"{self.install_column_owner.get(install_x)}",
                         )
+                        robot.status = RobotStatus.WAITING_PRECEDENCE
                         continue
 
             if (
@@ -840,6 +896,7 @@ class SimulationEngine:
         注入所有当前没有有效移动路径的机器人。规划自身时，带
         _STATIC_ 前缀的自身预约会被排除；其他机器人仍能看到它。
         """
+        self.reservation_table.release_by_prefix("_STATIC_")
         count = 0
         for rid, robot in self.robots.items():
             if robot.current_anchor is None:
@@ -847,13 +904,19 @@ class SimulationEngine:
             if robot.status == RobotStatus.MOVING and robot.current_path is not None:
                 continue
             cells = self.footprint.cells_at(robot.current_anchor)
-            # 滚动占用窗口：足以让规划器先等待/绕行；窗口之后仍由
-            # 执行前安全仲裁兜底，避免把暂时静止者当作永久墙体。
-            horizon = min(self._max_steps + 1, self.current_time + 16)
-            self.reservation_table.reserve_pose_range(
-                self.current_time, horizon, cells, f"_STATIC_{rid}"
-            )
-            count += horizon - self.current_time
+            if robot.finished or robot.status == RobotStatus.FINISHED:
+                # 已完成并停靠的机器人是持续存在的物理障碍，必须让
+                # 后续路径在任意未来时刻都避开它。
+                self.reservation_table.reserve_static(cells, f"_STATIC_{rid}")
+                count += 1
+            else:
+                # 其他静止机器人可能很快启动/继续任务，只作为短窗口
+                # 动态障碍注入，避免过度保守地堵死主干道。
+                horizon = min(self._max_steps + 1, self.current_time + 16)
+                self.reservation_table.reserve_pose_range(
+                    self.current_time, horizon, cells, f"_STATIC_{rid}"
+                )
+                count += horizon - self.current_time
         return count
 
     # ==================================================================
@@ -922,6 +985,16 @@ class SimulationEngine:
         trunk_y = self.pose_graph.trunk_y_threshold
         current_x = max(1, min(max_x, robot.current_anchor.x))
         candidates: list[Cell] = []
+        if robot.current_anchor.y < trunk_y:
+            # 避让专用：优先在内部通道横向短移到邻列/邻通道。这里使用
+            # yield_pose_graph，正式作业路径仍不能内部横移换列。
+            for dy in (0, 1, -1, 2, -2, 3, -3):
+                y = max(1, min(self.terrain.shape[0] - footprint_height + 1, robot.current_anchor.y + dy))
+                for dx in (-1, 1, -2, 2, -3, 3, -4, 4, -5, 5):
+                    x = max(1, min(max_x, current_x + dx))
+                    cell = Cell(x, y)
+                    if cell not in candidates:
+                        candidates.append(cell)
         for y in (trunk_y, min(self.terrain.shape[0] - footprint_height + 1, 28)):
             for dx in (0, -2, 2, -4, 4, -8, 8):
                 x = max(1, min(max_x, current_x + dx))
@@ -933,6 +1006,8 @@ class SimulationEngine:
         return sorted(
             candidates,
             key=lambda c: (
+                # 内部横向让行优先，其次才是主干道/起点停车。
+                0 if c.y < trunk_y else 1,
                 abs(c.x - robot.current_anchor.x) + abs(c.y - robot.current_anchor.y),
                 c == robot.spec.start_anchor,
             ),
@@ -951,9 +1026,19 @@ class SimulationEngine:
         for candidate in self._yield_candidates(robot):
             if candidate == robot.current_anchor:
                 continue
-            if not self.pose_graph.is_valid_pose(candidate):
+            planner = (
+                self.yield_space_time_astar
+                if candidate.y < self.pose_graph.trunk_y_threshold
+                else self.space_time_astar
+            )
+            graph = (
+                self.yield_pose_graph
+                if candidate.y < self.pose_graph.trunk_y_threshold
+                else self.pose_graph
+            )
+            if not graph.is_valid_pose(candidate):
                 continue
-            candidate_path = self.space_time_astar.plan(
+            candidate_path = planner.plan(
                 robot.current_anchor,
                 candidate,
                 self.current_time,
@@ -1124,7 +1209,11 @@ class SimulationEngine:
                 robot.status = RobotStatus.IDLE
 
             elif atype == "wait":
-                pass  # 保持当前状态
+                reason = action.get("reason", "unknown")
+                self._log_event(
+                    f"wait_{reason}_tick",
+                    f"{rid}: wait reason={reason}",
+                )
 
     def _filter_unsafe_actions(self, actions: dict[str, dict]) -> dict[str, dict]:
         """执行前用实时位置做最后一道安全仲裁。
@@ -1137,7 +1226,7 @@ class SimulationEngine:
         current_cells = {
             rid: self.footprint.cells_at(robot.current_anchor)
             for rid, robot in self.robots.items()
-            if robot.current_anchor is not None and not robot.finished
+            if robot.current_anchor is not None
         }
         move_ids = sorted(
             rid for rid, action in actions.items()
@@ -1184,6 +1273,7 @@ class SimulationEngine:
         # 且挡路者当前没有作业/移动，则让挡路者主动驶回停车位。这样
         # 避免“每项操作后都回停车位”的过度保守，也避免在窄通道中
         # 无限重规划撞上同一个静止 footprint。
+        yielded_blockers: set[str] = set()
         if len(self.robots) > 2:
             for blocker in sorted(set(cancelled.values())):
                 blocking_robot = self.robots.get(blocker)
@@ -1197,9 +1287,16 @@ class SimulationEngine:
                 blocking_robot.status = RobotStatus.IDLE
                 self.reservation_table.release_future(blocker, self.current_time)
                 safe[blocker] = {"action_type": "wait", "reason": "yield_clearance"}
+                yielded_blockers.add(blocker)
                 self._log_event(
                     "yield_requested",
                     f"{blocker}: clearing blocked passage for other robot",
+                )
+        for rid, blocker in cancelled.items():
+            if blocker in yielded_blockers and rid in self.robots:
+                self.robots[rid].retry_after = min(
+                    self.robots[rid].retry_after,
+                    self.current_time + 2,
                 )
 
         # A 执行任务优先。发生 A/B 冲突时，B 在退避结束后主动驶向
