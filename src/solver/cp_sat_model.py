@@ -31,6 +31,7 @@ class ModelArtifacts:
     column_switches: Any
     load_gap: Any
     preference_penalty: Any
+    dynamic_avoidance_penalty: Any
     max_first_start: Any
     total_first_start: Any
 
@@ -103,6 +104,8 @@ class CpSatScheduler:
         secondary = (
             self._artifacts.column_switches * 100_000
             + self._artifacts.load_gap * 1_000
+            + self._artifacts.dynamic_avoidance_penalty
+              * self.config.dynamic_avoidance_weight
             + self._artifacts.preference_penalty * 100
             + sum(self._artifacts.start.values())
         )
@@ -745,6 +748,56 @@ class CpSatScheduler:
         load_gap = model.NewIntVar(0, horizon, "load_gap")
         model.Add(load_gap == (sum(load_gaps) if load_gaps else 0))
 
+        dynamic_risk_terms = []
+        if self.config.enable_dynamic_avoidance_cost:
+            buffer = max(0, self.config.dynamic_avoidance_time_buffer)
+            column_distance = max(0, self.config.dynamic_avoidance_column_distance)
+            a_ops = [
+                op_id for op_id in operation_ids
+                if problem.operations[op_id].eligible_robot_type == RobotType.A
+            ]
+            b_ops = [
+                op_id for op_id in operation_ids
+                if problem.operations[op_id].eligible_robot_type == RobotType.B
+            ]
+            for a_id in a_ops:
+                a_machine = problem.machines[problem.operations[a_id].machine_id]
+                a_x = a_machine.cells[0].x
+                for b_id in b_ops:
+                    b_machine = problem.machines[problem.operations[b_id].machine_id]
+                    b_x = b_machine.cells[0].x
+                    if abs(a_x - b_x) > column_distance:
+                        continue
+                    a_before_b = model.NewBoolVar(
+                        f"dynamic_separated[{a_id},{b_id},A_before_B]"
+                    )
+                    b_before_a = model.NewBoolVar(
+                        f"dynamic_separated[{a_id},{b_id},B_before_A]"
+                    )
+                    risk = model.NewBoolVar(
+                        f"dynamic_avoidance_risk[{a_id},{b_id}]"
+                    )
+                    # 若 A/B 在同列或邻列作业，且两个服务区间没有至少 buffer
+                    # 的时间间隔，则记为一次动态避让风险。该风险不等同于
+                    # 精确路径冲突，但能让 CP-SAT 在调度层提前避开高概率会
+                    # 触发 Space-Time A* 等待/让行的近距离同步作业。
+                    model.Add(start[b_id] >= end[a_id] + buffer).OnlyEnforceIf(
+                        a_before_b
+                    )
+                    model.Add(start[a_id] >= end[b_id] + buffer).OnlyEnforceIf(
+                        b_before_a
+                    )
+                    model.AddBoolOr([a_before_b, b_before_a, risk])
+                    dynamic_risk_terms.append(risk)
+
+        dynamic_avoidance_penalty = model.NewIntVar(
+            0, max(1, len(dynamic_risk_terms)), "dynamic_avoidance_penalty"
+        )
+        model.Add(
+            dynamic_avoidance_penalty
+            == (sum(dynamic_risk_terms) if dynamic_risk_terms else 0)
+        )
+
         install_ends = [
             end[op_id] for op_id in operation_ids
             if problem.operations[op_id].operation_type == OperationType.INSTALL
@@ -754,7 +807,8 @@ class CpSatScheduler:
         artifacts = ModelArtifacts(
             operation_ids, eligible_by_robot, assigned, start, end, intervals,
             arcs, makespan, total_travel, column_switches, load_gap,
-            preference_penalty, max_first_start, total_first_start,
+            preference_penalty, dynamic_avoidance_penalty,
+            max_first_start, total_first_start,
         )
         if not self._add_single_pair_warm_start(model, problem, artifacts):
             self._add_multi_robot_warm_start(model, problem, artifacts)

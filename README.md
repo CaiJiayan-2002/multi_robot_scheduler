@@ -230,7 +230,7 @@ outputs/scenario_2/test12/animation_smooth.mp4
 
 ### scenario2 / v2.4：CP-SAT 固定流水线列顺序 + test18
 
-当前 v2.4 对应推荐结果为 `scenario_2/test18`。
+v2.4 对应快速稳定基线结果为 `scenario_2/test18`。
 
 运行入口：
 
@@ -287,6 +287,105 @@ python scripts/create_animation_fast.py test18 scenario_2 10 24
 
 ```text
 outputs/scenario_2/test18/animation_smooth.mp4
+```
+
+### scenario2 / v2.5.0：路径冲突反馈闭环 + 全时空联合优化原型对比
+
+当前 v2.5.0 对应闭环优化实验结果为 `scenario_2/test20`。该版本在 v2.4/v2.3
+的 CP-SAT 完整调度和 Space-Time A* 路径规划基础上，进一步打通“路径层冲突
+反馈 → CP-SAT 重新求解”的闭环。
+
+运行入口：
+
+```bash
+source .venv/bin/activate
+python scripts/run_scenario_2_full.py test20
+python scripts/create_animation_fast.py test20 scenario_2 10 24
+```
+
+结果目录：
+
+```text
+outputs/scenario_2/test20/
+```
+
+v2.5.0 的核心变化：
+
+1. 路径规划输出结构化冲突信息  
+   `src/planning/conflicts.py` 中的 `PlanningConflict` 记录机器人 ID、冲突机器人、
+   冲突 operation id、冲突时间区间、冲突类型、来源事件、建议延迟和建议前置约束。
+
+2. 仿真器记录真实运行期冲突  
+   `src/simulation/engine.py` 会在 `planning_failed`、`collision_avoided` /
+   `safety_guard` 等情况下生成结构化冲突反馈。路径规划器仍不改变任务顺序，
+   只把发现的问题交回高层调度器。
+
+3. CP-SAT 支持反馈约束重新求解  
+   `scripts/run_scenario_2_full.py test20` 会执行：
+
+   ```text
+   CP-SAT 初次求解
+   → Space-Time A* 仿真执行
+   → 生成 PlanningConflict
+   → 提取 additional_precedence_constraints
+   → CP-SAT 重新求解
+   → 再次仿真并选择零碰撞、零违规且 makespan 更短的结果
+   ```
+
+4. 闭环过程可追溯  
+   test20 会额外输出：
+
+   ```text
+   outputs/scenario_2/test20/closed_loop_feedback.json
+   outputs/scenario_2/test20/planning_conflicts.json
+   outputs/scenario_2/test20/robot_time_accounting.json
+   ```
+
+   其中 `closed_loop_feedback.json` 会记录每轮 makespan、replans、规划冲突数、
+   新增反馈约束和运行期低效信号。
+
+5. 全时空联合优化原型对比  
+   新增脚本：
+
+   ```bash
+   python scripts/compare_joint_optimization.py
+   ```
+
+   输出：
+
+   ```text
+   outputs/analysis/joint_vs_closed_loop/joint_vs_closed_loop_report.json
+   ```
+
+   该脚本构建缩小版 time-expanded joint path prototype，用于估算如果把机器人
+   每个时间步的位置也直接放进 CP-SAT，变量规模和求解时间会如何增长。
+
+当前 `test20` 验证结果：
+
+- makespan：1014；
+- 完成机器：48 / 48；
+- 完成操作：144 / 144；
+- 碰撞：0；
+- 约束违规：0；
+- replans：2；
+- 闭环反馈轮次：3；
+- 累计反馈约束：5；
+- 输出动画：`outputs/scenario_2/test20/animation_smooth.mp4`。
+
+全时空联合优化原型对比结论：
+
+- 缩小版原型：3 机器人固定目标路径子问题，horizon=46，布尔变量 144,996，
+  约束 90,219，求解时间约 5.80 秒；
+- 完整 scenario_2 路径-only 外推：仅位置和转移布尔变量下界约 6,493,092；
+- 线性求解时间估算约 4.3 分钟，二次估算约 3.2 小时；
+- 真正完整联合优化还需加入 144 个 D/I/R 操作、任务分配、服务持续时间和工序
+  前置关系，因此近期更适合继续采用“CP-SAT 高层调度 + Space-Time A* 路径执行
+  + 路径冲突反馈闭环”的分层方案。
+
+更完整的技术说明、实验表格和报告图片建议见：
+
+```text
+docs/internship_report_draft.md
 ```
 
 ## 核心功能
@@ -382,14 +481,17 @@ outputs/scenario_1/cp_sat_current_video/animation_smooth.mp4
 说明任务顺序来自 CP-SAT 求解器，而不是 row-major、column-major 或其他
 手工排序代码。
 
-## 2A1B 场景 test8 / test12 / test18 代码使用说明
+## 2A1B 场景 test8 / test12 / test18 / test20 代码使用说明
 
 `scenario_2/test8` 是 v2.2 的列块约束版本；`scenario_2/test12` 是 v2.3
-等待/避让时间优化基线；`scenario_2/test18` 是当前 v2.4 推荐版本，在 test12
-的基础上加入固定流水线列顺序，并禁止仿真器运行期重排 B 的检测队列。
+等待/避让时间优化基线；`scenario_2/test18` 是 v2.4 快速稳定基线，在 test12
+的基础上加入固定流水线列顺序，并禁止仿真器运行期重排 B 的检测队列；
+`scenario_2/test20` 是 v2.5.0 闭环优化实验版本，在路径层冲突反馈后允许
+CP-SAT 追加前置/延迟约束并重新求解。
 
-三者都表示 2 台 A 类机器人和 1 台 B 类机器人协同完成同一批 48 台离心机的
-拆卸、检测和安装。当前建议优先运行 `test18`。
+这些版本都表示 2 台 A 类机器人和 1 台 B 类机器人协同完成同一批 48 台离心机的
+拆卸、检测和安装。若需要快速稳定复现，建议运行 `test18`；若需要当前最短
+makespan 和闭环分析结果，建议运行 `test20`。
 
 ### 运行 2A1B test18
 

@@ -7,6 +7,7 @@ import os
 import re
 import sys
 import time
+from dataclasses import asdict, replace
 from pathlib import Path
 
 PROJECT = Path(__file__).resolve().parent.parent
@@ -283,6 +284,92 @@ def inspection_column_order(schedule, machines, operations) -> tuple[int, ...]:
     return tuple(order)
 
 
+def serialize_conflicts(conflicts) -> list[dict]:
+    """把仿真层反馈转换为 JSON 可读格式。"""
+    return [asdict(conflict) for conflict in conflicts]
+
+
+def feedback_constraints_from_conflicts(
+    conflicts,
+    valid_operation_ids: set[str] | None = None,
+) -> tuple[tuple[str, str, int], ...]:
+    """提取可转成 CP-SAT precedence/delay 的反馈约束，并去重。"""
+    unique: dict[tuple[str, str], tuple[str, str, int]] = {}
+    for conflict in conflicts:
+        suggested = conflict.suggested_precedence_constraint
+        if suggested is None:
+            continue
+        before, after, delay = suggested
+        if valid_operation_ids is not None and (
+            before not in valid_operation_ids or after not in valid_operation_ids
+        ):
+            continue
+        if before == after:
+            continue
+        key = (before, after)
+        if key not in unique or delay > unique[key][2]:
+            unique[key] = (before, after, max(1, delay))
+    return tuple(unique.values())
+
+
+def summarize_runtime_inefficiency(robot_time_accounting: dict) -> dict:
+    """从仿真统计里提取闭环尚未转成 CP-SAT 约束的低效信号。"""
+    by_robot = robot_time_accounting.get("by_robot", {})
+    rows = []
+    for rid, values in by_robot.items():
+        waiting = int(values.get("waiting_time", 0))
+        working = int(values.get("working_time", 0))
+        total = int(values.get("accounting_total_time", 0))
+        detail = values.get("waiting_detail", {})
+        rows.append({
+            "robot_id": rid,
+            "waiting_time": waiting,
+            "working_time": working,
+            "waiting_ratio": round(waiting / total, 4) if total else 0,
+            "precedence_wait_time": int(detail.get("precedence_wait_time", 0)),
+            "conflict_wait_time": int(detail.get("conflict_wait_time", 0)),
+            "retry_backoff_wait_time": int(detail.get("retry_backoff_wait_time", 0)),
+            "safety_guard_wait_time": int(detail.get("safety_guard_wait_time", 0)),
+            "yield_clearance_wait_time": int(detail.get("yield_clearance_wait_time", 0)),
+        })
+    rows.sort(key=lambda item: item["waiting_time"], reverse=True)
+    return {
+        "note": (
+            "These are diagnostic signals for future soft penalties; "
+            "only PlanningConflict.suggested_precedence_constraint is "
+            "converted into a hard CP-SAT feedback constraint in this MVP."
+        ),
+        "by_waiting_time_desc": rows,
+    }
+
+
+def run_schedule_once(
+    terrain,
+    machines,
+    operations,
+    robots,
+    schedule,
+    started: float,
+):
+    """执行一次仿真并返回 engine/metrics/accounting 数据。"""
+    engine = SimulationEngine()
+    engine.setup(terrain, machines, operations, robots, schedule)
+    engine.run(max_steps=60000)
+    timing = {
+        "simulation": time.perf_counter() - started,
+        "total_wall": time.perf_counter() - started,
+    }
+    metrics = MetricsCalculator.compute(
+        engine.event_log, engine.robots, engine.state_machine,
+        engine.current_time, timing,
+    )
+    machine_summary = engine.state_machine.summary()
+    robot_time_accounting = calculate_robot_time_accounting(
+        engine.event_log, sorted(robots.keys())
+    )
+    return engine, metrics, machine_summary, robot_time_accounting, timing
+
+
 def main() -> None:
     experiment = sys.argv[1] if len(sys.argv) > 1 else "260703_test11"
     output = PROJECT / "outputs" / "scenario_2" / experiment
@@ -299,19 +386,20 @@ def main() -> None:
     left_to_right_wave_experiments = {"test13", "test18"}
     enforce_column_blocks = experiment in {
         "test7", "test8", "test9", "test10", "test11", "test12", "test13",
-        "test17", "test18",
+        "test17", "test18", "test19", "test20",
     }
     enforce_disassembly_priority = experiment in {
         "test8", "test9", "test10", "test11", "test12", "test13", "test17",
-        "test18",
+        "test18", "test19", "test20",
     }
     enforce_b_follow_disassembly = experiment in {
-        "test10", "test11", "test12", "test13", "test17", "test18",
+        "test10", "test11", "test12", "test13", "test17", "test18", "test19",
+        "test20",
     }
-    minimize_initial_wait = experiment in {"test12", "test13", "test17", "test18"}
-    allow_early_service_start = experiment in {"test12", "test13", "test17", "test18"}
+    minimize_initial_wait = experiment in {"test12", "test13", "test17", "test18", "test19", "test20"}
+    allow_early_service_start = experiment in {"test12", "test13", "test17", "test18", "test19", "test20"}
     enforce_left_to_right_waves = experiment in left_to_right_wave_experiments
-    cp_time_budget = 20 if experiment == "test17" else 60
+    cp_time_budget = 20 if experiment == "test17" else (120 if experiment == "test20" else 60)
     column_wave_order = ((2, 5), (8, 11), (14, 17), (20, 23)) if enforce_left_to_right_waves else ()
     preferred_inspection_order = (5, 2, 8, 11, 14, 17, 20, 23) if enforce_left_to_right_waves else ()
     preferred_a_column_order = (2, 5, 8, 11, 14, 17, 20, 23) if experiment == "test18" else ()
@@ -326,7 +414,7 @@ def main() -> None:
         # A_1/A_2 process physical columns 1/2, 3/4, 5/6, 7/8 in pairs;
         # B inspects physical column 2 first, then 1,3,4,5,6,7,8.
         install_order = preferred_a_column_order
-    elif experiment in {"test11", "test12", "test13"}:
+    elif experiment in {"test11", "test12", "test13", "test19", "test20"}:
         base_schedule = solve_assignment_schedule(
             terrain, machines, operations, robots,
             SolverConfig(
@@ -347,14 +435,13 @@ def main() -> None:
                 enforce_inspection_finish_column_before_next=enforce_left_to_right_waves,
                 preferred_disassembly_column_order=preferred_a_column_order,
                 enforce_alternating_disassembly_by_preferred_order=bool(preferred_a_column_order),
+                enable_dynamic_avoidance_cost=experiment in {"test19", "test20"},
                 minimize_initial_start_wait=minimize_initial_wait,
             ),
         )
         install_order = inspection_column_order(base_schedule, machines, operations)
 
-    schedule = solve_assignment_schedule(
-        terrain, machines, operations, robots,
-        SolverConfig(
+    solver_config = SolverConfig(
             max_time_seconds=cp_time_budget,
             allow_fallback=False,
             enforce_robot_column_blocks=enforce_column_blocks,
@@ -373,29 +460,150 @@ def main() -> None:
             enforce_inspection_finish_column_before_next=enforce_left_to_right_waves,
             preferred_disassembly_column_order=preferred_a_column_order,
             enforce_alternating_disassembly_by_preferred_order=bool(preferred_a_column_order),
+            enable_dynamic_avoidance_cost=experiment in {"test19", "test20"},
             preferred_install_column_order=install_order,
             enforce_install_start_follows_preferred_order=bool(install_order),
             enforce_alternating_install_by_preferred_order=bool(install_order),
             minimize_initial_start_wait=minimize_initial_wait,
             allow_early_service_start=allow_early_service_start,
-        ),
+    )
+    schedule = solve_assignment_schedule(
+        terrain, machines, operations, robots, solver_config
     )
 
-    engine = SimulationEngine()
-    engine.setup(terrain, machines, operations, robots, schedule)
-    engine.run(max_steps=60000)
-    timing = {
-        "simulation": time.perf_counter() - started,
-        "total_wall": time.perf_counter() - started,
+    closed_loop_feedback: dict = {
+        "enabled": experiment == "test20",
+        "strategy": (
+            "simulate -> export structured conflicts -> add CP-SAT "
+            "precedence/delay constraints -> re-solve"
+        ),
+        "iterations": [],
+        "selected_iteration": 0,
+        "accepted_constraints": [],
     }
-    metrics = MetricsCalculator.compute(
-        engine.event_log, engine.robots, engine.state_machine,
-        engine.current_time, timing,
-    )
-    machine_summary = engine.state_machine.summary()
-    robot_time_accounting = calculate_robot_time_accounting(
-        engine.event_log, sorted(robots.keys())
-    )
+    if experiment == "test20":
+        max_feedback_iterations = 3
+        feedback_constraints: tuple[tuple[str, str, int], ...] = ()
+        best_tuple = None
+        best_score = None
+        current_schedule = schedule
+        current_config = solver_config
+        seen_constraints: set[tuple[str, str, int]] = set()
+
+        for iteration in range(max_feedback_iterations + 1):
+            (
+                loop_engine,
+                loop_metrics,
+                loop_machine_summary,
+                loop_robot_time_accounting,
+                loop_timing,
+            ) = run_schedule_once(
+                terrain, machines, operations, robots, current_schedule, started
+            )
+            loop_conflicts = serialize_conflicts(loop_engine.planning_conflicts)
+            new_constraints = feedback_constraints_from_conflicts(
+                loop_engine.planning_conflicts,
+                set(operations),
+            )
+            newly_accepted = [
+                constraint for constraint in new_constraints
+                if constraint not in seen_constraints
+            ]
+            for constraint in newly_accepted:
+                seen_constraints.add(constraint)
+
+            loop_record = {
+                "iteration": iteration,
+                "makespan": loop_metrics.makespan,
+                "collisions": loop_metrics.collision_count,
+                "constraint_violations": loop_metrics.constraint_violation_count,
+                "precedence_violations": loop_metrics.precedence_violation_count,
+                "replans": loop_metrics.number_of_replans,
+                "planning_conflict_count": len(loop_engine.planning_conflicts),
+                "new_feedback_constraints": [
+                    list(constraint) for constraint in newly_accepted
+                ],
+                "runtime_inefficiency": summarize_runtime_inefficiency(
+                    loop_robot_time_accounting
+                ),
+            }
+            closed_loop_feedback["iterations"].append(loop_record)
+
+            score = (
+                loop_metrics.collision_count,
+                loop_metrics.constraint_violation_count,
+                loop_metrics.makespan,
+                loop_metrics.number_of_replans,
+            )
+            if best_score is None or score < best_score:
+                best_score = score
+                best_tuple = (
+                    iteration,
+                    current_schedule,
+                    loop_engine,
+                    loop_metrics,
+                    loop_machine_summary,
+                    loop_robot_time_accounting,
+                    loop_timing,
+                    loop_conflicts,
+                )
+
+            if iteration == max_feedback_iterations or not newly_accepted:
+                break
+
+            feedback_constraints = tuple(
+                dict.fromkeys(feedback_constraints + tuple(newly_accepted))
+            )
+            closed_loop_feedback["accepted_constraints"] = [
+                list(constraint) for constraint in feedback_constraints
+            ]
+            current_config = replace(
+                solver_config,
+                additional_precedence_constraints=feedback_constraints,
+            )
+            try:
+                current_schedule = solve_assignment_schedule(
+                    terrain, machines, operations, robots, current_config
+                )
+            except Exception as exc:  # pragma: no cover - diagnostic path
+                loop_record["repair_failed"] = str(exc)
+                break
+
+        assert best_tuple is not None
+        (
+            selected_iteration,
+            schedule,
+            engine,
+            metrics,
+            machine_summary,
+            robot_time_accounting,
+            timing,
+            selected_conflicts,
+        ) = best_tuple
+        closed_loop_feedback["selected_iteration"] = selected_iteration
+        closed_loop_feedback["selected_planning_conflict_count"] = len(
+            selected_conflicts
+        )
+        (output / "planning_conflicts.json").write_text(
+            json.dumps(selected_conflicts, indent=2, ensure_ascii=False)
+        )
+    else:
+        (
+            engine,
+            metrics,
+            machine_summary,
+            robot_time_accounting,
+            timing,
+        ) = run_schedule_once(
+            terrain, machines, operations, robots, schedule, started
+        )
+        (output / "planning_conflicts.json").write_text(
+            json.dumps(
+                serialize_conflicts(engine.planning_conflicts),
+                indent=2,
+                ensure_ascii=False,
+            )
+        )
 
     data = {
         "scenario": "2A1B",
@@ -413,6 +621,7 @@ def main() -> None:
             engine.event_log, sorted(robots.keys())
         ),
         "robot_time_accounting": robot_time_accounting,
+        "closed_loop_feedback": closed_loop_feedback,
         "collisions_violations": {
             "collisions": metrics.collision_count,
             "constraint_violations": metrics.constraint_violation_count,
@@ -441,6 +650,30 @@ def main() -> None:
             "enforce_contiguous_bottom_up_inspection_chain": enforce_left_to_right_waves,
             "preferred_disassembly_column_order": list(preferred_a_column_order),
             "enforce_alternating_disassembly_by_preferred_order": bool(preferred_a_column_order),
+            "enable_dynamic_avoidance_cost": experiment in {"test19", "test20"},
+            "closed_loop_feedback_enabled": experiment == "test20",
+            "closed_loop_feedback_iterations": (
+                len(closed_loop_feedback["iterations"])
+                if experiment == "test20" else 0
+            ),
+            "additional_precedence_constraints": [
+                list(constraint)
+                for constraint in getattr(
+                    schedule, "solver_objective", {}
+                ).get("additional_precedence_constraints", [])
+            ],
+            "dynamic_avoidance_penalty": getattr(
+                schedule, "solver_objective", {}
+            ).get("dynamic_avoidance_penalty"),
+            "dynamic_avoidance_time_buffer": getattr(
+                schedule, "solver_objective", {}
+            ).get("dynamic_avoidance_time_buffer"),
+            "dynamic_avoidance_column_distance": getattr(
+                schedule, "solver_objective", {}
+            ).get("dynamic_avoidance_column_distance"),
+            "dynamic_avoidance_weight": getattr(
+                schedule, "solver_objective", {}
+            ).get("dynamic_avoidance_weight"),
             "preferred_install_column_order": list(install_order),
             "enforce_install_start_follows_preferred_order": bool(install_order),
             "enforce_alternating_install_by_preferred_order": bool(install_order),
@@ -452,6 +685,9 @@ def main() -> None:
     }
     (output / "metrics.json").write_text(
         json.dumps(data, indent=2, ensure_ascii=False)
+    )
+    (output / "closed_loop_feedback.json").write_text(
+        json.dumps(closed_loop_feedback, indent=2, ensure_ascii=False)
     )
     (output / "robot_time_accounting.json").write_text(
         json.dumps(robot_time_accounting, indent=2, ensure_ascii=False)

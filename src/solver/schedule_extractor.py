@@ -28,6 +28,13 @@ def extract_cp_sat_schedule(problem, config, solver, status, artifacts) -> Sched
         "column_switch_count": result.column_switch_count,
         "load_gap": result.load_gap,
         "preference_penalty": solver.Value(artifacts.preference_penalty),
+        "dynamic_avoidance_penalty": solver.Value(
+            artifacts.dynamic_avoidance_penalty
+        ),
+        "enable_dynamic_avoidance_cost": config.enable_dynamic_avoidance_cost,
+        "dynamic_avoidance_time_buffer": config.dynamic_avoidance_time_buffer,
+        "dynamic_avoidance_column_distance": config.dynamic_avoidance_column_distance,
+        "dynamic_avoidance_weight": config.dynamic_avoidance_weight,
         "max_first_start": solver.Value(artifacts.max_first_start),
         "total_first_start": solver.Value(artifacts.total_first_start),
         "makespan_tolerance": config.makespan_tolerance,
@@ -85,6 +92,10 @@ def extract_cp_sat_schedule(problem, config, solver, status, artifacts) -> Sched
         "allow_early_service_start": config.allow_early_service_start,
         "random_seed": config.random_seed,
         "num_search_workers": config.num_search_workers,
+        "additional_precedence_constraints": [
+            list(constraint)
+            for constraint in config.additional_precedence_constraints
+        ],
     }
     result.objective = dict(result.solver_objective)
 

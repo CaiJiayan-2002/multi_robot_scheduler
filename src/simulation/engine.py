@@ -817,6 +817,18 @@ class SimulationEngine:
                     ),
                     minimum_required_delay=1,
                     suggested_precedence_constraint=suggested,
+                    conflict_type="planning_failed",
+                    conflicting_robot_id=None,
+                    source_event="planning_failed",
+                    details={
+                        "target_operation_id": next_op_id,
+                        "target_machine_id": operation.machine_id,
+                        "blocker_operation_ids": blockers,
+                        "robot_anchor": (
+                            {"x": robot.current_anchor.x, "y": robot.current_anchor.y}
+                            if robot.current_anchor else None
+                        ),
+                    },
                 ))
                 self._log_event("planning_failed",
                     f"{rid}: cannot plan path to {operation.machine_id}")
@@ -1262,6 +1274,12 @@ class SimulationEngine:
 
         for rid, blocker in cancelled.items():
             safe[rid] = {"action_type": "wait", "reason": "safety_guard"}
+            self._record_runtime_conflict(
+                robot_id=rid,
+                blocker_id=blocker,
+                conflict_type="safety_guard",
+                source_event="collision_avoided",
+            )
             self._cancel_current_plan(rid)
             self._log_event(
                 "collision_avoided",
@@ -1314,6 +1332,61 @@ class SimulationEngine:
                 self._log_event("yield_requested", "B_1: yielding right-of-way to A_1")
 
         return safe
+
+    def _record_runtime_conflict(
+        self,
+        robot_id: str,
+        blocker_id: str | None,
+        conflict_type: str,
+        source_event: str,
+        delay: int = 2,
+    ) -> None:
+        """把运行期避让/安全仲裁转换成可反馈给 CP-SAT 的结构化冲突。
+
+        这里不直接改变当前仿真的任务顺序；它只记录“下一轮 CP-SAT
+        可以考虑的约束”。如果两台机器人都有明确 current_op_id，
+        则建议让 blocker 当前操作先于被阻塞机器人的当前操作完成。
+        """
+        robot = self.robots.get(robot_id)
+        blocker = self.robots.get(blocker_id) if blocker_id else None
+        op_id = robot.current_op_id if robot else None
+        blocker_op_id = blocker.current_op_id if blocker else None
+        ops = tuple(
+            op
+            for op in (op_id, blocker_op_id)
+            if op and op in self.operations
+        )
+        suggested = None
+        if (
+            op_id
+            and blocker_op_id
+            and op_id in self.operations
+            and blocker_op_id in self.operations
+            and op_id != blocker_op_id
+        ):
+            suggested = (blocker_op_id, op_id, delay)
+        self.planning_conflicts.append(PlanningConflict(
+            robot_id=robot_id,
+            conflicting_robot_id=blocker_id,
+            conflicting_operation_ids=ops,
+            conflicting_time_interval=(self.current_time, self.current_time + delay),
+            minimum_required_delay=delay,
+            suggested_precedence_constraint=suggested,
+            conflict_type=conflict_type,
+            source_event=source_event,
+            details={
+                "robot_anchor": (
+                    {"x": robot.current_anchor.x, "y": robot.current_anchor.y}
+                    if robot and robot.current_anchor else None
+                ),
+                "blocker_anchor": (
+                    {"x": blocker.current_anchor.x, "y": blocker.current_anchor.y}
+                    if blocker and blocker.current_anchor else None
+                ),
+                "robot_status": robot.status.name if robot else None,
+                "blocker_status": blocker.status.name if blocker else None,
+            },
+        ))
 
     def _cancel_current_plan(self, rid: str) -> None:
         """安全地撤销未完成路径，并把任务放回队首等待重规划。"""

@@ -47,6 +47,10 @@ class SolverConfig:
     minimize_initial_start_wait: bool = False
     allow_early_service_start: bool = False
     penalize_column_switch: bool = True
+    enable_dynamic_avoidance_cost: bool = False
+    dynamic_avoidance_time_buffer: int = 8
+    dynamic_avoidance_column_distance: int = 3
+    dynamic_avoidance_weight: int = 50_000
     random_seed: int = 1
     num_search_workers: int = 8
     # (before_operation_id, after_operation_id, required_delay)
